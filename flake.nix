@@ -19,21 +19,21 @@
       );
       # TODO tree formatter to also hit up the ruff formatter
       formatter = forAllSystems (system: self.legacyPackages.${system}.nixfmt-tree);
-      packages = forAllSystems (system: {
-        inherit (self.legacyPackages.${system})
-          simplifiedVideoLibraryRenamer
-          ;
-        default = self.legacyPackages.${system}.simplifiedVideoLibraryRenamer;
-      });
-      apps = forAllSystems (system: {
-        simplifiedVideoLibraryRenamer = {
-          type = "app";
-          program = "${
-            self.legacyPackages.${system}.simplifiedVideoLibraryRenamer
-          }/bin/simplifiedVideoLibraryRenamer";
-        };
-        default = self.apps.${system}.simplifiedVideoLibraryRenamer;
-      });
+      #packages = forAllSystems (system: {
+      #  inherit (self.legacyPackages.${system})
+      #    simplifiedVideoLibraryRenamer
+      #    ;
+      #  default = self.legacyPackages.${system}.simplifiedVideoLibraryRenamer;
+      #});
+      #apps = forAllSystems (system: {
+      #  simplifiedVideoLibraryRenamer = {
+      #    type = "app";
+      #    program = "${
+      #      self.legacyPackages.${system}.simplifiedVideoLibraryRenamer
+      #    }/bin/simplifiedVideoLibraryRenamer";
+      #  };
+      #  default = self.apps.${system}.simplifiedVideoLibraryRenamer;
+      #});
       devShells = forAllSystems (
         system:
         (
