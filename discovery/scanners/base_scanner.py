@@ -1,6 +1,8 @@
 import argparse
 import os
+import stat
 import sys
+import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional
@@ -78,17 +80,31 @@ class BaseScanner(ABC):
 
     def reexec(self) -> None:
         """
-        Replace this process with a root-elevated copy via pkexec.
+        Replace this process with a root-elevated copy via sudo.
         Does not return.
 
-        sys.path and sys.argv are embedded into a -c bootstrap string so the
-        elevated process has the correct library paths before importing anything,
-        working around pkexec's environment wipe.
+        Uses sudo -A (askpass) with the bundled tkinter askpass helper so a GUI
+        prompt appears without requiring pkexec or a polkit policy file.
+        Uses sudo -E to preserve the environment so that nix/venv library paths
+        remain intact in the elevated process.
         """
+        askpass_py = Path(__file__).parent.parent / "askpass.py"
+        # SUDO_ASKPASS must be a single executable path, not a command string.
+        # Write a copy of the askpass script with a shebang pointing to the
+        # current interpreter so no shell is required.
+        askpass_exe = Path(tempfile.gettempdir()) / "discovery_askpass"
+        askpass_exe.write_text(f"#!{sys.executable}\n" + askpass_py.read_text())
+        askpass_exe.chmod(stat.S_IRWXU)
+        env = os.environ.copy()
+        env["SUDO_ASKPASS"] = str(askpass_exe)
         bootstrap = (
             f"import sys; "
             f"sys.argv = {sys.argv!r}; "
             f"sys.path = {sys.path!r}; "
             f"import runpy; runpy.run_path({sys.argv[0]!r}, run_name='__main__')"
         )
-        os.execvp("pkexec", ["pkexec", sys.executable, "-c", bootstrap])
+        os.execvpe(
+            "sudo",
+            ["sudo", "-A", "-E", sys.executable, "-c", bootstrap],
+            env,
+        )
