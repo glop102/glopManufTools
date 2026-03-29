@@ -30,7 +30,9 @@ class DiscoveryClient(MsgSocket):
         second server process will fail to bind and exit, leaving the first one
         running.
         """
-        unix_path = None if tcp_socket else (unix_socket_path or _default_unix_socket_path())
+        unix_path = (
+            None if tcp_socket else (unix_socket_path or _default_unix_socket_path())
+        )
 
         try:
             return cls._open_connection(unix_path, tcp_socket)
@@ -64,12 +66,15 @@ class DiscoveryClient(MsgSocket):
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             sock.connect(unix_path.as_posix())
         else:
-            raise RuntimeError("DiscoveryClient._open_connection() called without a tcp or unix socket")
+            raise RuntimeError(
+                "DiscoveryClient._open_connection() called without a tcp or unix socket"
+            )
         return cls(sock)
 
     @classmethod
     def _spawn_server(cls) -> None:
         from . import server as server_module
+
         subprocess.Popen(
             [sys.executable, server_module.__file__],
             start_new_session=True,

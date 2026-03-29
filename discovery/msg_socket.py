@@ -5,6 +5,7 @@ from select import select
 
 logger = logging.getLogger("discovery")
 
+
 class MsgSocket:
     """
     Wrapper around a connected stream socket that frames messages with a 4-byte
@@ -29,26 +30,30 @@ class MsgSocket:
         also clients sending messages in chunks.
         """
         # While the socket is readable, drain its buffer
-        while len(select([self._sock],[],[],0.0)[0]):
+        while len(select([self._sock], [], [], 0.0)[0]):
             # Try to read from the buffer from the socket
             chunk = self._sock.recv(4096)
             if not chunk:
-                raise ConnectionError("Socket Closed when retrieving buffer for messages")
+                raise ConnectionError(
+                    "Socket Closed when retrieving buffer for messages"
+                )
             self._read_buf += chunk
 
         # Now that we have fully drained the socket's buffer, lets try to parse out any messages that have been sent
         # We parse the header to know the size, then if there are enough bytes in the buffer, we mutate the buffer
         # and add it to the list of messages
-        messages_found:list[str] = []
+        messages_found: list[str] = []
         while len(self._read_buf) >= 4:
             (msg_len,) = struct.unpack(">I", self._read_buf[:4])
-            if len(self._read_buf) >= msg_len+4:
-                msg = self._read_buf[4:4+msg_len]
-                self._read_buf = self._read_buf[4+msg_len:]
+            if len(self._read_buf) >= msg_len + 4:
+                msg = self._read_buf[4 : 4 + msg_len]
+                self._read_buf = self._read_buf[4 + msg_len :]
                 try:
                     messages_found.append(msg.decode("utf-8"))
                 except UnicodeDecodeError as e:
-                    logger.error(f"Unable to decode buffered message: len({msg_len})",exc_info=e)
+                    logger.error(
+                        f"Unable to decode buffered message: len({msg_len})", exc_info=e
+                    )
             else:
                 # The message is not fully buffered yet
                 break

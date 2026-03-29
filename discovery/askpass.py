@@ -4,6 +4,7 @@ Reads the prompt from argv[1], shows a GUI password dialog, prints the
 password to stdout, and exits. A non-zero exit or empty output causes sudo
 to abort the elevation.
 """
+
 import sys
 import tkinter as tk
 import tkinter.simpledialog

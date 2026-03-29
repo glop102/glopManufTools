@@ -9,13 +9,14 @@ from typing import Optional
 
 from discovery.client import DiscoveryClient
 
+
 def _parse_tcp_socket(value: str) -> tuple[str, int]:
     """Parse a --tcp-socket value into (host, port). Handles IPv6 [::1]:1234."""
     if value.startswith("["):
         # IPv6: [::1]:1234
         bracket_end = value.index("]")
         host = value[1:bracket_end]
-        port = int(value[bracket_end + 2:])
+        port = int(value[bracket_end + 2 :])
     else:
         host, _, port_str = value.rpartition(":")
         port = int(port_str)
@@ -45,7 +46,7 @@ class BaseScanner(ABC):
 
     unix_socket_path: Optional[Path] = None
     tcp_socket: Optional[tuple[str, int]] = None
-    server:Optional["DiscoveryClient"] = None
+    server: Optional["DiscoveryClient"] = None
 
     def parse_args(self, args: list[str]) -> list[str]:
         """
