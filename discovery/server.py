@@ -68,20 +68,26 @@ class DiscoveryServer:
             os.unlink(self.socket_path)
 
     def main_loop(self):
-        self.unannounced_connections:list[ClientConnection] = []
+        self.unannounced_connections: list[ClientConnection] = []
+        self.clients: list[ClientConnection] = []
+        self.scanners: list[ScannerConnection] = []
 
         while True:
-            wait_until_read = [self.socket]
-            wait_until_write = []
-            wait_until_exception = [self.socket]
+            all_connections = self.unannounced_connections + self.clients + self.scanners
+            wait_until_read = [self.socket] + all_connections
+            wait_until_write = [c for c in all_connections if c.msg_data_write_queued()]
+            wait_until_exception = []
             ready_to_read, ready_to_write, exceptional = select(wait_until_read, wait_until_write, wait_until_exception)
+
+            for s in ready_to_write:
+                s.flush_write_buf()
 
             for s in ready_to_read:
                 if s == self.socket:
-                    new_connection = s.accept()
-                    self.unannounced_connections.append(ClientConnection(new_connection))
+                    sock, _addr = self.socket.accept()
+                    self.unannounced_connections.append(ClientConnection(sock))
                 else:
-                    print("Another socket type ready to read:",s)
+                    print("Another socket type ready to read:", s)
 
 if __name__ == "__main__":
     DiscoveryServer().start()

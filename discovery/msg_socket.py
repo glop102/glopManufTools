@@ -15,7 +15,8 @@ class MsgSocket:
 
     def __init__(self, sock: socket.socket):
         self._sock = sock
-        self._buf = b""
+        self._read_buf = b""
+        self._write_buf = b""
 
     def fileno(self) -> int:
         """Allow select() to use this object directly."""
@@ -33,17 +34,17 @@ class MsgSocket:
             chunk = self._sock.recv(4096)
             if not chunk:
                 raise ConnectionError("Socket Closed when retrieving buffer for messages")
-            self._buf += chunk
+            self._read_buf += chunk
 
         # Now that we have fully drained the socket's buffer, lets try to parse out any messages that have been sent
         # We parse the header to know the size, then if there are enough bytes in the buffer, we mutate the buffer
         # and add it to the list of messages
         messages_found:list[str] = []
-        while len(self._buf) >= 4:
-            (msg_len,) = struct.unpack(">I", self._buf[:4])
-            if len(self._buf) >= msg_len+4:
-                msg = self._buf[4:4+msg_len]
-                self._buf = self._buf[4+msg_len:]
+        while len(self._read_buf) >= 4:
+            (msg_len,) = struct.unpack(">I", self._read_buf[:4])
+            if len(self._read_buf) >= msg_len+4:
+                msg = self._read_buf[4:4+msg_len]
+                self._read_buf = self._read_buf[4+msg_len:]
                 try:
                     messages_found.append(msg.decode("utf-8"))
                 except UnicodeDecodeError as e:
@@ -53,10 +54,28 @@ class MsgSocket:
                 break
         return messages_found
 
+    def msg_data_write_queued(self) -> bool:
+        return len(self._write_buf) > 0
+
     def send_msg(self, msg: str) -> None:
         """
-        Send a message framed with a 4-byte big-endian length header.
+        Queue a message for sending, framed with a 4-byte big-endian length
+        header, and flush as much of the write buffer to the socket as possible
+        without blocking.
         """
         data = msg.encode("utf-8")
-        header = struct.pack(">I", len(data))
-        self._sock.sendall(header + data)
+        self._write_buf += struct.pack(">I", len(data)) + data
+        self.flush_write_buf()
+
+    def flush_write_buf(self) -> None:
+        """
+        Write as many queued bytes to the socket as possible without blocking.
+        Any bytes that could not be sent remain in the buffer for the next flush.
+        """
+        if not self._write_buf:
+            return
+        try:
+            sent = self._sock.send(self._write_buf)
+            self._write_buf = self._write_buf[sent:]
+        except BlockingIOError:
+            pass

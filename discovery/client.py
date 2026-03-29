@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from .msg_socket import MsgSocket
+from discovery.msg_socket import MsgSocket
 
 
 def _default_unix_socket_path() -> Path:
