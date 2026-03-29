@@ -7,6 +7,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional
 
+from discovery.client import DiscoveryClient
 
 def _parse_tcp_socket(value: str) -> tuple[str, int]:
     """Parse a --tcp-socket value into (host, port). Handles IPv6 [::1]:1234."""
@@ -44,6 +45,7 @@ class BaseScanner(ABC):
 
     unix_socket_path: Optional[Path] = None
     tcp_socket: Optional[tuple[str, int]] = None
+    server:Optional["DiscoveryClient"] = None
 
     def parse_args(self, args: list[str]) -> list[str]:
         """
@@ -61,7 +63,6 @@ class BaseScanner(ABC):
         return remaining
 
     def connect_to_server(self):
-        from discovery.client import DiscoveryClient
         self.server = DiscoveryClient.connect(
             unix_socket_path=self.unix_socket_path,
             tcp_socket=self.tcp_socket,

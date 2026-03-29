@@ -1,3 +1,4 @@
+import json
 import os
 from select import select
 import socket
@@ -17,8 +18,16 @@ class ScannerConnection(MsgSocket):
     to initialise scanner-specific state.
     """
 
-    def first_connection_setup(self):
-        pass
+    name:str = "" # Scanner name is generally something human readable for what it is scanning
+    parameters:dict[str,str] = {} # Configurable parameters of a scanner - eg domains of mDNS
+    interfaces:list[str] = [] # The interfaces that the scanner knows about as being available
+    active_interfaces:list[str] = [] # The list of interfaces the scanner is actively scanning
+
+    def first_connection_setup(self, announce_message:dict):
+        self.name:str = announce_message.get("name","")
+        self.parameters:dict[str,str] = announce_message.get("parameters",{})
+        self.interfaces:list[str] = announce_message.get("interfaces",[])
+        self.active_interfaces:list[str] = []
 
 class DiscoveryServer:
     def open_server_socket(self,path:Optional[Path]=None) -> Path:
@@ -77,17 +86,51 @@ class DiscoveryServer:
                 if s == self.socket:
                     sock, _addr = self.socket.accept()
                     self.unannounced_connections.append(MsgSocket(sock))
-                    logger.info(f"New connection from {_addr}")
-                else:
+                    logger.debug(f"New connection from {_addr}")
+                elif s in self.clients or s in self.unannounced_connections:
                     logger.debug(f"Another socket type ready to read: {s}")
                     try:
-                        logger.debug(f"    {s.read_msgs()}")
+                        msgs:list[str] = s.read_msgs()
+                        logger.debug(f"    {msgs}")
+                        self._handle_client_msgs(s,msgs)
                     except ConnectionError:
                         logger.info("    Disconnecting connection")
-                        for lst in (self.unannounced_connections, self.clients, self.scanners):
-                            if s in lst:
-                                lst.remove(s)
-                                break
+                        if s in self.unannounced_connections:
+                            self.unannounced_connections.remove(s)
+                        else:
+                            self.clients.remove(s)
+                else:
+                    try:
+                        msgs:list[str] = s.read_msgs()
+                        logger.debug(f"    {msgs}")
+                        self._handle_client_msgs(s,msgs)
+                    except ConnectionError:
+                        logger.info("    Disconnecting Scanner")
+                        self.scanners.remove(s)
+    
+    def _handle_client_msgs(self, conn:MsgSocket, messages:list[str]):
+        for raw in messages:
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                logger.warning(f"Received non-JSON message: {raw!r}")
+                continue
+            match msg.get("command"):
+                case "announce":
+                    match msg.get("type"):
+                        case "scanner":
+                            conn.__class__ = ScannerConnection
+                            conn.first_connection_setup(msg)
+                            self.unannounced_connections.remove(conn)
+                            self.scanners.append(conn)
+                            logger.info(f"Scanner announced: {conn.name!r} with interfaces {conn.interfaces}")
+                        case unknown:
+                            logger.warning(f"Announce with unknown type: {unknown!r}")
+                case unknown:
+                    logger.warning(f"Unknown command from unannounced connection: {unknown!r}")
+
+    def _handle_scanner_msgs(self, socket:ScannerConnection, messages:list[str]):
+        pass
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)
