@@ -1,18 +1,51 @@
 # Discovery Service
 
-This is a standalone process that is able to leverage different scanners on individual interfaces to find computers or other hardware.
-Clients of this service will have a convenient connect() method available that will transparently spawn the new discovery process if it is not already running.
-All IPC is done via sockets with null byte seperated messages encoded as json.
+A standalone broker process that manages scanner subprocesses and serves cached discovery results to clients over a Unix socket.
 
-Managment interface
-- Clients connect and can query
-  - All cached discoveries, or discoveries within a time period
-  - currently running scanners amd available scanners -> mapping of scanner_type to list\[interfaces\]
-- Clients can send commands
-  - single time no exit whith no clients -> any client connecting clears the flag and will exit with no clients again
-  - flush all cache and have all hardware told that it has gone offline to all clients
-  - Turn scanners on/off per interface
-  - elevate the socket spawner preemptivly
+## Architecture
 
-Dream list
-- widget in the corner as a client that can do some etra controls and keep discovery running between main program sessions and maybe just be a handy thing to eyeball what is around
+### Management Socket
+
+The discovery server binds a Unix socket. Two categories of connection are expected:
+
+- **Clients** — query cached data, subscribe to events, control scanners
+- **Scanners** — register their capabilities, report results, receive start/stop commands
+
+All messages are JSON framed with a 4-byte big-endian length header.
+
+### Scanners
+
+Each scanner type is its own process. Scanners connect to the management socket and register themselves, declaring what options they accept and which interfaces they are available on.
+
+When asked to begin scanning, a scanner can self-re-exec under `pkexec` to acquire the privileges it needs. The socket path is passed as a CLI argument (`--socket-path`) so the elevated process can reconnect and re-register. The server should treat a re-registering scanner as a continuation, not a conflict.
+
+Built-in scanners (e.g. mDNS, LLDP) are auto-started by the discovery server on launch but follow the same registration path as any external scanner.
+
+### Privilege Model
+
+No part of the discovery server itself runs as root. Each scanner is responsible for its own privilege lifecycle. When elevation is needed, the scanner re-execs itself under `pkexec`. This scopes privilege prompts to the specific scanner type rather than granting a blanket root elevation to the whole discovery process.
+
+## Client API
+
+```python
+from discovery import DiscoveryClient
+
+dsc = DiscoveryClient.connect()  # spawns server if not running
+
+dsc.single_scan("mdns", domains=["_http._tcp.local"])
+dsc.subscribe("mdns", domains=["_http._tcp.local"], callback=update_gui)
+dsc.start_scanner("mdns", interfaces=["eth0"])
+dsc.stop_scanner("mdns", interfaces=["eth0"])
+dsc.get_active_interfaces()   # -> dict[scanner_name, list[str]]
+dsc.get_inactive_interfaces()
+```
+
+Scanner types are strings, not an enum. Scanners self-register their available options and interfaces at connect time.
+
+## Client Commands
+
+- `single_scan` — start a scan and wait for results, then stop
+- `subscribe` / `unsubscribe` — receive ongoing events of a given type
+- `start_scanner` / `stop_scanner` — control per-interface scanner state
+- `flush_cache` — clear all cached data and notify clients that all hardware has gone offline
+- `no_exit_on_empty` — one-shot flag; server will exit when the last client disconnects unless a client clears this flag

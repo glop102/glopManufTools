@@ -1,11 +1,33 @@
 import os
+from select import select
 import socket
-import subprocess
-import sys
 from pathlib import Path
 from typing import Optional
+import logging
 
-from . import socket_spawner
+from .msg_socket import MsgSocket
+
+logger = logging.getLogger("discovery")
+
+class ScannerConnection(MsgSocket):
+    """
+    Server-side representation of a connected scanner process.
+    Wraps the accepted socket from the listening server socket and inherits
+    message framing from MsgSocket. Instances can be passed directly to select().
+    """
+
+    def __init__(self, sock: socket.socket):
+        super().__init__(sock)
+
+class ClientConnection(MsgSocket):
+    """
+    Server-side representation of a connected client.
+    Wraps the accepted socket from the listening server socket and inherits
+    message framing from MsgSocket. Instances can be passed directly to select().
+    """
+
+    def __init__(self, sock: socket.socket):
+        super().__init__(sock)
 
 class DiscoveryServer:
     def open_server_socket(self,path:Optional[Path]=None) -> Path:
@@ -21,50 +43,45 @@ class DiscoveryServer:
             else:
                 path = Path("/tmp/glopmanuf/")
 
-        # Try to make sure the unix socket folder exists for us to bind into
         if not path.exists():
             path.mkdir(exist_ok=True,parents=True)
 
-        # Open a unix socket on the system for other client services to connect to
         self.socket = socket.socket(
             family=socket.AF_UNIX,
             type=socket.SOCK_STREAM,
         )
-        # Probably lets you re-use a unix socket if the file is already there and the server is not activly bound to it?
+        # Technically does nothing for unix sockets, but leaving it here for when we eventually add in TCP connections
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        # Actually put the socket at the intended path
+        logger.info(f"Opening discovery server socket at {path/"discovery"}")
         self.socket.bind((path/"discovery").as_posix())
         self.socket_path = path/"discovery"
+        self.socket.listen()
 
         return self.socket_path
 
-    def spawn_socket_spawner(self):
-        subprocess.Popen(
-            [
-                sys.executable,
-                socket_spawner.__file__,
-                "--socket-path",
-                self.socket_path,
-            ],
-            start_new_session=True,
-        )
-
-    def __init__(self):
-        self.open_server_socket()
-
-        # Spawn socket opening services and have it connect to the management socket by passing it the path argument to the socket
-        self.spawn_socket_spawner()
-
-        # Main loop of listening for clients connecting
-        # 2 lists and a special var
-        # - unannounced connections -> if nothing for 2 seconds, close the connection
-        # - clients -> the send in a response telling us they are a client  with an {"announce":"client"}\0
-        # - socket_spawner -> single var holder and we error if someone else announces and it is already assigned
+    def start(self):
         try:
+            self.open_server_socket()
             self.main_loop()
         finally:
             self.socket.close()
             os.unlink(self.socket_path)
-    
+
     def main_loop(self):
-        pass
+        self.unannounced_connections:list[ClientConnection] = []
+
+        while True:
+            wait_until_read = [self.socket]
+            wait_until_write = []
+            wait_until_exception = [self.socket]
+            ready_to_read, ready_to_write, exceptional = select(wait_until_read, wait_until_write, wait_until_exception)
+
+            for s in ready_to_read:
+                if s == self.socket:
+                    new_connection = s.accept()
+                    self.unannounced_connections.append(ClientConnection(new_connection))
+                else:
+                    print("Another socket type ready to read:",s)
+
+if __name__ == "__main__":
+    DiscoveryServer().start()

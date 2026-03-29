@@ -60,7 +60,7 @@
               shellHook = ''
                 export PS1='\n(dev) \[\033[1;32m\][\[\e]0;\u@\h: \w\a\]\u@\h:\w]\$\[\033[0m\] '
                 # TODO add to the module search path fo use our local folders
-                export PYTHONPATH=$PYTHONPATH
+                export PYTHONPATH=$(pwd):$PYTHONPATH
               '';
             };
           }
