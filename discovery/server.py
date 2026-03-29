@@ -86,8 +86,18 @@ class DiscoveryServer:
                 if s == self.socket:
                     sock, _addr = self.socket.accept()
                     self.unannounced_connections.append(ClientConnection(sock))
+                    logger.info(f"New connection from {_addr}")
                 else:
-                    print("Another socket type ready to read:", s)
+                    logger.debug(f"Another socket type ready to read: {s}")
+                    try:
+                        logger.debug(f"    {s.read_msgs()}")
+                    except ConnectionError:
+                        logger.info("    Disconnecting connection")
+                        for lst in (self.unannounced_connections, self.clients, self.scanners):
+                            if s in lst:
+                                lst.remove(s)
+                                break
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.DEBUG)
     DiscoveryServer().start()

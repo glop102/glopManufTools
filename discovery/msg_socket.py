@@ -57,15 +57,21 @@ class MsgSocket:
     def msg_data_write_queued(self) -> bool:
         return len(self._write_buf) > 0
 
-    def send_msg(self, msg: str) -> None:
+    def send_msg(self, msg: str, send_synchronous: bool = True) -> None:
         """
-        Queue a message for sending, framed with a 4-byte big-endian length
-        header, and flush as much of the write buffer to the socket as possible
-        without blocking.
+        Send a message framed with a 4-byte big-endian length header.
+        When send_synchronous is True (default), flushes the entire write buffer
+        via sendall() so the call blocks until all queued bytes are sent.
+        When False, queues the bytes and flushes as much as possible without
+        blocking, leaving any remainder for the next flush_write_buf() call.
         """
         data = msg.encode("utf-8")
         self._write_buf += struct.pack(">I", len(data)) + data
-        self.flush_write_buf()
+        if send_synchronous:
+            self._sock.sendall(self._write_buf)
+            self._write_buf = b""
+        else:
+            self.flush_write_buf()
 
     def flush_write_buf(self) -> None:
         """
