@@ -12,7 +12,7 @@ class MdnsScanner(BaseScanner):
             raise RuntimeError(
                 "Scanner returned from connect_to_server() without a valid self.server instance"
             )
-        # TODO - add an announce method to the base scanner that tells the server we are a scanner and gives the list of parameters that we take
+        # Announce to the server we are a scanner and give the list of parameters that we take
         interfaces = [name for _, name in socket.if_nameindex()]
         announce = {
             "command": "announce",

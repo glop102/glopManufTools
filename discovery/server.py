@@ -34,7 +34,7 @@ class ScannerConnection(MsgSocket):
 
     def first_connection_setup(self, announce_message: dict):
         self.name: str = announce_message.get("name", "")
-        self.parameters: dict[str, str] = announce_message.get("parameters", {})
+        self.parameters: dict[str, str] = {k: "" for k in announce_message.get("parameters", [])}
         self.interfaces: list[str] = announce_message.get("interfaces", [])
         self.active_interfaces: list[str] = []
 
@@ -131,6 +131,9 @@ class DiscoveryServer:
                 continue
             match msg.get("command"):
                 case "announce":
+                    if conn not in self.unannounced_connections:
+                        logger.warning("Received announce from already-announced connection, ignoring")
+                        continue
                     match msg.get("type"):
                         case "scanner":
                             conn.__class__ = ScannerConnection
@@ -140,6 +143,10 @@ class DiscoveryServer:
                             logger.info(
                                 f"Scanner announced: {conn.name!r} with interfaces {conn.interfaces}"
                             )
+                        case "client":
+                            self.unannounced_connections.remove(conn)
+                            self.clients.append(conn)
+                            logger.info("Client announced")
                         case unknown:
                             logger.warning(f"Announce with unknown type: {unknown!r}")
                 case unknown:
