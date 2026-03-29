@@ -12,22 +12,13 @@ logger = logging.getLogger("discovery")
 class ScannerConnection(MsgSocket):
     """
     Server-side representation of a connected scanner process.
-    Wraps the accepted socket from the listening server socket and inherits
-    message framing from MsgSocket. Instances can be passed directly to select().
+    Promoted from a plain MsgSocket via __class__ assignment after the scanner
+    announces itself. Call first_connection_setup() immediately after promotion
+    to initialise scanner-specific state.
     """
 
-    def __init__(self, sock: socket.socket):
-        super().__init__(sock)
-
-class ClientConnection(MsgSocket):
-    """
-    Server-side representation of a connected client.
-    Wraps the accepted socket from the listening server socket and inherits
-    message framing from MsgSocket. Instances can be passed directly to select().
-    """
-
-    def __init__(self, sock: socket.socket):
-        super().__init__(sock)
+    def first_connection_setup(self):
+        pass
 
 class DiscoveryServer:
     def open_server_socket(self,path:Optional[Path]=None) -> Path:
@@ -68,8 +59,8 @@ class DiscoveryServer:
             os.unlink(self.socket_path)
 
     def main_loop(self):
-        self.unannounced_connections: list[ClientConnection] = []
-        self.clients: list[ClientConnection] = []
+        self.unannounced_connections: list[MsgSocket] = []
+        self.clients: list[MsgSocket] = []
         self.scanners: list[ScannerConnection] = []
 
         while True:
@@ -85,7 +76,7 @@ class DiscoveryServer:
             for s in ready_to_read:
                 if s == self.socket:
                     sock, _addr = self.socket.accept()
-                    self.unannounced_connections.append(ClientConnection(sock))
+                    self.unannounced_connections.append(MsgSocket(sock))
                     logger.info(f"New connection from {_addr}")
                 else:
                     logger.debug(f"Another socket type ready to read: {s}")
