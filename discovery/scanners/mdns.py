@@ -2,7 +2,58 @@ import json
 import socket
 import sys
 from discovery.scanners.base_scanner import BaseScanner
+from typing import Optional
 
+from pydantic import BaseModel, computed_field
+from scapy.layers.dns import DNS, DNSQR, dnstypes
+
+MDNS_ADDR6 = "ff02::fb"
+MDNS_PORT = 5353
+
+TYPE_A = 1
+TYPE_PTR = 12
+TYPE_TXT = 16
+TYPE_AAAA = 28
+TYPE_SRV = 33
+
+class MDNSResponseRecord(BaseModel):
+    interface: str
+    src_ip: str
+    rrname: str
+    rtype: int
+    rdata: str
+    ttl: int
+    received_at: float
+    response_time: Optional[float] = None  # None if record arrived unsolicited
+
+    @computed_field
+    @property
+    def type_name(self) -> str:
+        return dnstypes.get(self.rtype, str(self.rtype))
+
+    @computed_field
+    @property
+    def is_shared(self) -> bool:
+        """PTR records are shared (multiple devices can answer for one service type)."""
+        return self.rtype == TYPE_PTR
+
+
+class MDNSServiceData(BaseModel):
+    interface: str
+    instance_name: str
+    service_type: str
+    hostname: Optional[str] = None
+    port: Optional[int] = None
+    addresses: list[str] = []
+    txt: dict[str, str] = {}
+
+    def __eq__(self, other) -> bool:
+        if not isinstance(other, MDNSServiceData):
+            return NotImplemented
+        return self.interface == other.interface and self.instance_name == other.instance_name
+
+    def __hash__(self) -> int:
+        return hash((self.interface, self.instance_name))
 
 class MdnsScanner(BaseScanner):
     def start(self, args: list[str]):
