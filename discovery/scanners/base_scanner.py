@@ -11,19 +11,7 @@ from select import select
 from typing import Optional
 
 from discovery.client import DiscoveryClient
-
-
-def _parse_tcp_socket(value: str) -> tuple[str, int]:
-    """Parse a --tcp-socket value into (host, port). Handles IPv6 [::1]:1234."""
-    if value.startswith("["):
-        # IPv6: [::1]:1234
-        bracket_end = value.index("]")
-        host = value[1:bracket_end]
-        port = int(value[bracket_end + 2 :])
-    else:
-        host, _, port_str = value.rpartition(":")
-        port = int(port_str)
-    return host, port
+from discovery._utils import _parse_tcp_socket
 
 
 class BaseScanner(ABC):
@@ -68,8 +56,8 @@ class BaseScanner(ABC):
 
     def wait_for_registration(self, timeout: float = 5.0) -> None:
         """
-        Block until the server sends back {"command": "registered"} following an announce.
-        Raises RuntimeError on timeout or if an unexpected command is received.
+        Block until the server sends back {"command": "status", "status": "accepted"} following an announce.
+        Raises RuntimeError on timeout or if the response is not accepted.
         """
         assert self.server is not None
         ready, _, _ = select([self.server], [], [], timeout)

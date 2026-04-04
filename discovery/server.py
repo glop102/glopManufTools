@@ -12,6 +12,7 @@ from typing import Optional, Self
 import logging
 
 from .msg_socket import MsgSocket
+from ._utils import _parse_tcp_socket
 
 logger = logging.getLogger("discovery")
 
@@ -22,10 +23,12 @@ class ScannerConnection(MsgSocket):
     Wraps the MsgSocket from the announce handshake and adds scanner-specific state.
     """
 
-    name: str = ""
-    parameters: dict = {}
-    interfaces: list[str] = []
-    active_interfaces: list[str] = []
+    def __init__(self, sock: socket.socket) -> None:
+        super().__init__(sock)
+        self.name: str = ""
+        self.parameters: dict = {}
+        self.interfaces: list[str] = []
+        self.active_interfaces: list[str] = []
 
     def first_connection_setup(self, announce_message: dict) -> None:
         self.name = announce_message.get("name", "")
@@ -455,17 +458,6 @@ class DiscoveryServer:
                 case unknown:
                     logger.warning(f"Unknown command from scanner {scanner.name!r}: {unknown!r}")
 
-
-def _parse_tcp_socket(value: str) -> tuple[str, int]:
-    """Parse HOST:PORT, handling IPv6 bracketed addresses like [::1]:1234."""
-    if value.startswith("["):
-        bracket_end = value.index("]")
-        host = value[1:bracket_end]
-        port = int(value[bracket_end + 2:])
-    else:
-        host, _, port_str = value.rpartition(":")
-        port = int(port_str)
-    return host, port
 
 
 if __name__ == "__main__":

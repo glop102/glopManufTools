@@ -139,7 +139,7 @@ def scan(service: str, iface: str, timeout: int = 5) -> None:
         pkt = bytes(DNS(rd=0, qd=DNSQR(qname=name, qtype=qtype)))
         sock.sendto(pkt, (MDNS_ADDR6, MDNS_PORT, 0, ifindex))
 
-    def rx(src_ip: str, rtype: str, msg: str) -> None:
+    def print_rx(src_ip: str, rtype: str, msg: str) -> None:
         print(f"[{src_ip}][{rtype}] {msg}")
 
     with _make_socket(iface) as sock:
@@ -173,7 +173,7 @@ def scan(service: str, iface: str, timeout: int = 5) -> None:
                         interface=iface, src_ip=src_ip, rrname=rrname, rtype=rtype,
                         rdata=rdata, ttl=ttl, received_at=now, response_time=response_time,
                     ))
-                    rx(src_ip, "PTR", f"{rrname} -> {rdata}")
+                    print_rx(src_ip, "PTR", f"{rrname} -> {rdata}")
 
                     first_label = rdata.lstrip(".").split(".")[0]
                     if first_label.startswith("_"):
@@ -202,7 +202,7 @@ def scan(service: str, iface: str, timeout: int = 5) -> None:
                         interface=iface, src_ip=src_ip, rrname=rrname, rtype=rtype,
                         rdata=f"{target}:{port}", ttl=ttl, received_at=now, response_time=response_time,
                     ))
-                    rx(src_ip, "SRV", f"{rrname} -> {target}:{port}")
+                    print_rx(src_ip, "SRV", f"{rrname} -> {target}:{port}")
                     svc = services.get(rrname)
                     if svc is not None:
                         svc.port = port
@@ -238,7 +238,7 @@ def scan(service: str, iface: str, timeout: int = 5) -> None:
                     svc = services.get(rrname)
                     if svc is not None:
                         svc.txt.update(txt)
-                    rx(src_ip, "TXT", f"{rrname} -> {txt}")
+                    print_rx(src_ip, "TXT", f"{rrname} -> {txt}")
 
                 elif rtype in (TYPE_A, TYPE_AAAA):
                     label = "AAAA" if rtype == TYPE_AAAA else "A"
@@ -250,7 +250,7 @@ def scan(service: str, iface: str, timeout: int = 5) -> None:
                     host = hosts.get(rrname)
                     if host is not None and addr not in host.addresses:
                         host.addresses.append(addr)
-                    rx(src_ip, label, f"{rrname} -> {addr}")
+                    print_rx(src_ip, label, f"{rrname} -> {addr}")
 
     # --- All response records ---
     print(f"\n=== Response Records ({len(response_records)}) ===")

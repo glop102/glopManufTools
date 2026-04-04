@@ -17,8 +17,21 @@ import time
 from select import select
 
 from discovery.scanners.base_scanner import BaseScanner
-from discovery.protocol_client import ProtocolClient
 from discovery.scanners.mdns import MDNSHostData, MDNSServiceData
+
+
+def _send(sock, msg: dict) -> None:
+    sock.send_msg(json.dumps(msg))
+
+
+def _recv_one(sock, timeout: float = 5.0) -> dict:
+    ready, _, _ = select([sock], [], [], timeout)
+    if not ready:
+        raise RuntimeError(f"Timed out after {timeout}s waiting for a message")
+    msgs = sock.read_msgs()
+    if not msgs:
+        raise RuntimeError("Connection closed before a message was received")
+    return json.loads(msgs[0])
 
 logger = logging.getLogger("TestScanner")
 
@@ -74,7 +87,6 @@ class TestScanner(BaseScanner):
             raise
 
         assert self.server
-        proto = ProtocolClient(self.server)
 
         available = [i for i in parsed.available_interfaces.split(",") if i]
         active = [i for i in parsed.active_interfaces.split(",") if i]
@@ -89,7 +101,7 @@ class TestScanner(BaseScanner):
             "cache_clear_count": cache_clear_count,
         }
 
-        proto.send({
+        _send(self.server,{
             "command": "announce",
             "type": "scanner",
             "name": "test",
@@ -99,8 +111,8 @@ class TestScanner(BaseScanner):
         self.wait_for_registration()
 
         if parsed.emit_available_on_start:
-            proto.send({"command": "available_interfaces_changed", "interfaces": available})
-            proto.recv_one()
+            _send(self.server,{"command": "available_interfaces_changed", "interfaces": available})
+            _recv_one(self.server)
 
         self._continue_running = True
 
@@ -144,30 +156,30 @@ class TestScanner(BaseScanner):
                                 parsed.stop_delay = float(value)
 
                         if emit_available:
-                            proto.send({"command": "available_interfaces_changed", "interfaces": available})
-                            proto.recv_one()
+                            _send(self.server,{"command": "available_interfaces_changed", "interfaces": available})
+                            _recv_one(self.server)
 
                         if emit_active:
-                            proto.send({"command": "active_interfaces_changed", "interfaces": active})
-                            proto.recv_one()
+                            _send(self.server,{"command": "active_interfaces_changed", "interfaces": active})
+                            _recv_one(self.server)
 
-                        proto.send({"command": "parameters_changed", "parameters": changed_params})
-                        proto.recv_one()
+                        _send(self.server,{"command": "parameters_changed", "parameters": changed_params})
+                        _recv_one(self.server)
 
                     case "set_active_interfaces":
                         active = msg.get("interfaces", [])
                         initial_parameters["active_interfaces"] = ",".join(active)
-                        proto.send({"command": "active_interfaces_changed", "interfaces": active})
-                        proto.recv_one()
+                        _send(self.server,{"command": "active_interfaces_changed", "interfaces": active})
+                        _recv_one(self.server)
 
                     case "clear_cache":
                         cache_clear_count += 1
                         initial_parameters["cache_clear_count"] = cache_clear_count
-                        proto.send({
+                        _send(self.server,{
                             "command": "parameters_changed",
                             "parameters": [{"name": "cache_clear_count", "value": cache_clear_count}],
                         })
-                        proto.recv_one()
+                        _recv_one(self.server)
 
                     case "stop_scanner":
                         if parsed.stop_delay > 0:
