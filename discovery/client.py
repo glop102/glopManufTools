@@ -30,22 +30,21 @@ class DiscoveryClient(MsgSocket):
         second server process will fail to bind and exit, leaving the first one
         running.
         """
-        unix_path = (
-            None if tcp_socket else (unix_socket_path or _default_unix_socket_path())
-        )
+        if not unix_socket_path and not tcp_socket:
+            unix_socket_path = _default_unix_socket_path()
 
         try:
-            return cls._open_connection(unix_path, tcp_socket)
+            return cls._open_connection(unix_socket_path, tcp_socket)
         except (ConnectionRefusedError, FileNotFoundError):
-            if not spawn_if_missing or tcp_socket:
+            if not spawn_if_missing:
                 raise
 
-        cls._spawn_server()
+        cls._spawn_server(unix_socket_path, tcp_socket)
 
         for _ in range(20):
             time.sleep(0.1)
             try:
-                return cls._open_connection(unix_path, tcp_socket)
+                return cls._open_connection(unix_socket_path, tcp_socket)
             except (ConnectionRefusedError, FileNotFoundError):
                 continue
 
@@ -72,10 +71,20 @@ class DiscoveryClient(MsgSocket):
         return cls(sock)
 
     @classmethod
-    def _spawn_server(cls) -> None:
+    def _spawn_server(
+        cls,
+        unix_socket_path: Optional[Path],
+        tcp_socket: Optional[tuple[str, int]],
+    ) -> None:
         from . import server as server_module
 
-        subprocess.Popen(
-            [sys.executable, server_module.__file__],
-            start_new_session=True,
-        )
+        args = [sys.executable, server_module.__file__]
+        if tcp_socket:
+            host, port = tcp_socket
+            # Bracket IPv6 addresses to match HOST:PORT argparse convention
+            formatted_host = f"[{host}]" if ":" in host else host
+            args += ["--tcp-socket", f"{formatted_host}:{port}"]
+        elif unix_socket_path:
+            args += ["--unix-socket", str(unix_socket_path)]
+
+        subprocess.Popen(args, start_new_session=True)

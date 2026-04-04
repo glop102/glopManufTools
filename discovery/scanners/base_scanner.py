@@ -1,10 +1,13 @@
 import argparse
+import json
+import logging
 import os
 import stat
 import sys
 import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
+from select import select
 from typing import Optional
 
 from discovery.client import DiscoveryClient
@@ -48,7 +51,7 @@ class BaseScanner(ABC):
     tcp_socket: Optional[tuple[str, int]] = None
     server: Optional["DiscoveryClient"] = None
 
-    def parse_args(self, args: list[str]) -> list[str]:
+    def parse_connection_args(self, args: list[str]) -> list[str]:
         """
         Parse the base scanner arguments from args, assigning unix_socket_path
         or tcp_socket on this instance. Returns the arguments that were not
@@ -63,12 +66,31 @@ class BaseScanner(ABC):
         self.tcp_socket = parsed.tcp_socket
         return remaining
 
+    def wait_for_registration(self, timeout: float = 5.0) -> None:
+        """
+        Block until the server sends back {"command": "registered"} following an announce.
+        Raises RuntimeError on timeout or if an unexpected command is received.
+        """
+        assert self.server is not None
+        ready, _, _ = select([self.server], [], [], timeout)
+        if not ready:
+            raise RuntimeError("Timed out waiting for registered confirmation from server")
+        msgs = self.server.read_msgs()
+        registered = json.loads(msgs[0]) if msgs else {}
+        if registered.get("command") != "status" or registered.get("status") != "accepted":
+            raise RuntimeError(f"Expected status accepted, got: {registered!r}")
+
     def connect_to_server(self):
         self.server = DiscoveryClient.connect(
             unix_socket_path=self.unix_socket_path,
             tcp_socket=self.tcp_socket,
             spawn_if_missing=False,
         )
+
+    @abstractmethod
+    def stop(self) -> None:
+        """Signal the scanner to stop and clean up."""
+        ...
 
     @abstractmethod
     def start(self, args: list[str]) -> None:

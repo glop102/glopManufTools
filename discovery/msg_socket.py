@@ -78,6 +78,9 @@ class MsgSocket:
         else:
             self.flush_write_buf()
 
+    def close(self) -> None:
+        self._sock.close()
+
     def flush_write_buf(self) -> None:
         """
         Write as many queued bytes to the socket as possible without blocking.

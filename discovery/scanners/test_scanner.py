@@ -1,0 +1,193 @@
+"""
+Test scanner for exercising the discovery server protocol.
+
+Announces itself with a fixed set of fake interfaces so tests are hermetic and
+independent of the host machine's actual network interfaces. The scanner's
+behaviour is driven entirely through parameter changes sent by the test client,
+allowing a test driver to put it into known states and observe the resulting
+server fan-out messages.
+"""
+
+import argparse
+import json
+import logging
+import signal
+import sys
+import time
+from select import select
+
+from discovery.scanners.base_scanner import BaseScanner
+from discovery.protocol_client import ProtocolClient
+from discovery.scanners.mdns import MDNSHostData, MDNSServiceData
+
+logger = logging.getLogger("TestScanner")
+
+# Fake hosts preserved for future discovery reporting tests.
+_FAKE_HOSTS = [
+    MDNSHostData.model_validate({
+        "hostname": "router.local.",
+        "addresses": ["192.168.1.1", "fd00::1"],
+        "interface": "eth0",
+        "services": [
+            {"instance_name": "router HTTP", "service_type": "_http._tcp", "port": 80, "txt": {}},
+        ],
+    }),
+    MDNSHostData.model_validate({
+        "hostname": "printer.local.",
+        "addresses": ["192.168.1.50"],
+        "interface": "eth0",
+        "services": [
+            {"instance_name": "Office Printer", "service_type": "_ipp._tcp", "port": 631, "txt": {"ty": "LaserJet"}},
+        ],
+    }),
+    MDNSHostData.model_validate({
+        "hostname": "nas.local.",
+        "addresses": ["192.168.1.10"],
+        "services": [
+            {"name": "NAS SMB",  "type": "_smb._tcp",  "port": 445, "txt": {}},
+            {"name": "NAS HTTP", "type": "_http._tcp", "port": 8080, "txt": {"path": "/ui"}},
+        ],
+    }),
+]
+
+
+class TestScanner(BaseScanner):
+    def start(self, args: list[str]) -> None:
+        parser = argparse.ArgumentParser(description="Test scanner")
+        parser.add_argument("--interval", type=float, default=2.0,
+                            help="select() timeout in seconds between heartbeat ticks")
+        parser.add_argument("--available-interfaces", default="eth0,wlan0",
+                            help="Comma-separated fake interface list to report as available")
+        parser.add_argument("--active-interfaces", default="",
+                            help="Comma-separated interfaces to report as initially active")
+        parser.add_argument("--no-emit-available-on-start", dest="emit_available_on_start",
+                            action="store_false", default=True,
+                            help="Suppress the available_interfaces_changed sent after announce")
+        parser.add_argument("--stop-delay", type=float, default=0.0,
+                            help="Seconds to wait before exiting after receiving stop_scanner")
+        parsed = parser.parse_args(args)
+
+        try:
+            self.connect_to_server()
+        except Exception as e:
+            logger.error("Unable to connect to discovery server", exc_info=e)
+            raise
+
+        assert self.server
+        proto = ProtocolClient(self.server)
+
+        available = [i for i in parsed.available_interfaces.split(",") if i]
+        active = [i for i in parsed.active_interfaces.split(",") if i]
+        cache_clear_count = 0
+
+        initial_parameters = {
+            "interval": parsed.interval,
+            "available_interfaces": parsed.available_interfaces,
+            "active_interfaces": parsed.active_interfaces,
+            "emit_available_on_start": parsed.emit_available_on_start,
+            "stop_delay": parsed.stop_delay,
+            "cache_clear_count": cache_clear_count,
+        }
+
+        proto.send({
+            "command": "announce",
+            "type": "scanner",
+            "name": "test",
+            "interfaces": available,
+            "parameters": initial_parameters,
+        })
+        self.wait_for_registration()
+
+        if parsed.emit_available_on_start:
+            proto.send({"command": "available_interfaces_changed", "interfaces": available})
+            proto.recv_one()
+
+        self._continue_running = True
+
+        while self._continue_running:
+            ready, _, _ = select([self.server], [], [], parsed.interval)
+            if not ready:
+                # Heartbeat tick — reserved for future use.
+                continue
+
+            for raw in self.server.read_msgs():
+                try:
+                    msg = json.loads(raw)
+                except json.JSONDecodeError:
+                    logger.warning(f"Non-JSON message from server: {raw!r}")
+                    continue
+
+                command = msg.get("command")
+
+                match command:
+
+                    case "set_scanner_parameters":
+                        changed_params = []
+                        emit_available = False
+                        emit_active = False
+
+                        for entry in msg.get("parameters", []):
+                            name = entry.get("name")
+                            value = entry.get("value")
+                            initial_parameters[name] = value
+                            changed_params.append(entry)
+
+                            if name == "available_interfaces":
+                                available = [i for i in value.split(",") if i]
+                                emit_available = True
+                            elif name == "active_interfaces":
+                                active = [i for i in value.split(",") if i]
+                                emit_active = True
+                            elif name == "interval":
+                                parsed.interval = float(value)
+                            elif name == "stop_delay":
+                                parsed.stop_delay = float(value)
+
+                        if emit_available:
+                            proto.send({"command": "available_interfaces_changed", "interfaces": available})
+                            proto.recv_one()
+
+                        if emit_active:
+                            proto.send({"command": "active_interfaces_changed", "interfaces": active})
+                            proto.recv_one()
+
+                        proto.send({"command": "parameters_changed", "parameters": changed_params})
+                        proto.recv_one()
+
+                    case "set_active_interfaces":
+                        active = msg.get("interfaces", [])
+                        initial_parameters["active_interfaces"] = ",".join(active)
+                        proto.send({"command": "active_interfaces_changed", "interfaces": active})
+                        proto.recv_one()
+
+                    case "clear_cache":
+                        cache_clear_count += 1
+                        initial_parameters["cache_clear_count"] = cache_clear_count
+                        proto.send({
+                            "command": "parameters_changed",
+                            "parameters": [{"name": "cache_clear_count", "value": cache_clear_count}],
+                        })
+                        proto.recv_one()
+
+                    case "stop_scanner":
+                        if parsed.stop_delay > 0:
+                            time.sleep(parsed.stop_delay)
+                        self._continue_running = False
+                        break
+
+                    case unknown:
+                        logger.warning(f"Unknown command from server: {unknown!r}")
+
+    def stop(self) -> None:
+        self._continue_running = False
+
+
+if __name__ == "__main__":
+    scanner = TestScanner()
+    extra_args = scanner.parse_connection_args(sys.argv[1:])
+
+    def _handle_sigint(signum, frame):
+        scanner.stop()
+
+    signal.signal(signal.SIGINT, _handle_sigint)
+    scanner.start(extra_args)

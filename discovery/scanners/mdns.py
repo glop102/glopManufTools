@@ -17,6 +17,10 @@ TYPE_AAAA = 28
 TYPE_SRV = 33
 
 class MDNSResponseRecord(BaseModel):
+    """
+    Individual response records seen on the wire.
+    This is only planned on being used internally to cache values.
+    """
     interface: str
     src_ip: str
     rrname: str
@@ -24,7 +28,6 @@ class MDNSResponseRecord(BaseModel):
     rdata: str
     ttl: int
     received_at: float
-    response_time: Optional[float] = None  # None if record arrived unsolicited
 
     @computed_field
     @property
@@ -39,25 +42,43 @@ class MDNSResponseRecord(BaseModel):
 
 
 class MDNSServiceData(BaseModel):
-    interface: str
+    """
+    A single service with attached metadata about that service.
+    This should be contained under a Host as services only make sense combined with a host.
+    """
     instance_name: str
     service_type: str
-    hostname: Optional[str] = None
     port: Optional[int] = None
-    addresses: list[str] = []
     txt: dict[str, str] = {}
 
     def __eq__(self, other) -> bool:
         if not isinstance(other, MDNSServiceData):
             return NotImplemented
-        return self.interface == other.interface and self.instance_name == other.instance_name
+        return self.instance_name == other.instance_name
 
     def __hash__(self) -> int:
-        return hash((self.interface, self.instance_name))
+        return hash(self.instance_name)
+
+
+class MDNSHostData(BaseModel):
+    """
+    A Host that has reported services being available.
+    """
+    interface: str
+    hostname: str
+    addresses: list[str] = []
+    services: list[MDNSServiceData] = []
+
+    def __eq__(self, other) -> bool:
+        if not isinstance(other, MDNSHostData):
+            return NotImplemented
+        return self.interface == other.interface and self.hostname == other.hostname
+
+    def __hash__(self) -> int:
+        return hash((self.interface, self.hostname))
 
 class MdnsScanner(BaseScanner):
     def start(self, args: list[str]):
-        _ = self.parse_args(args)
         self.connect_to_server()
         if self.server == None:
             raise RuntimeError(
@@ -68,8 +89,8 @@ class MdnsScanner(BaseScanner):
         announce = {
             "command": "announce",
             "type": "scanner",
-            "name": "mdns",
-            "parameters": ["domains"],
+            "name": "mdns.v1",
+            "parameters": [],
             "interfaces": interfaces,
         }
         self.server.send_msg(json.dumps(announce))
@@ -78,4 +99,7 @@ class MdnsScanner(BaseScanner):
 
 if __name__ == "__main__":
     scanner = MdnsScanner()
-    scanner.start(sys.argv[1:])
+    # This fills out some basic information required to connect to the discovery server
+    # It is done this way to enable the in-place re-exec style of privlege elevation
+    extra_args = scanner.parse_connection_args(sys.argv[1:])
+    scanner.start(extra_args)
