@@ -120,7 +120,7 @@ class MdnsScanner(BaseScanner):
             default="",
             help="IPv6 address to bind to (default: :: — all interfaces)",
         )
-        params = parser.parse_args(args)
+        self._params = parser.parse_args(args)
 
         self.connect_to_server()
         if self.server is None:
@@ -133,15 +133,15 @@ class MdnsScanner(BaseScanner):
             "type": "scanner",
             "name": "mdns.v1",
             "parameters": {
-                "port": params.port,
-                "bind_address": params.bind_address,
+                "port": self._params.port,
+                "bind_address": self._params.bind_address,
             },
             "interfaces": interfaces,
         }
         self.server.send_msg(json.dumps(announce))
         self.wait_for_registration()
 
-        self._mdns_listener = self._create_mdns_listener(params.bind_address, params.port)
+        self._mdns_listener = self._create_mdns_listener(self._params.bind_address, self._params.port)
         self._active_interfaces: set[str] = set()
         self._keep_running = True
         try:
@@ -193,8 +193,33 @@ class MdnsScanner(BaseScanner):
 
             match msg.get("command"):
                 case "set_scanner_parameters":
-                    # TODO: apply parameter updates and send parameters_changed
-                    logger.debug("set_scanner_parameters: %s", msg.get("parameters"))
+                    changed = []
+                    for entry in msg.get("parameters", []):
+                        name = entry.get("name")
+                        value = entry.get("value")
+                        if not hasattr(self._params, name):
+                            logger.warning("Ignoring unknown parameter %r", name)
+                            continue
+                        if getattr(self._params, name) == value:
+                            continue
+                        setattr(self._params, name, value)
+                        changed.append(name)
+                        logger.debug("Parameter %r changed to %r", name, value)
+                    if changed:
+                        if "port" in changed or "bind_address" in changed:
+                            self._mdns_listener.close()
+                            self._mdns_listener = self._create_mdns_listener(
+                                self._params.bind_address, self._params.port
+                            )
+                            for iface in self._active_interfaces:
+                                self._join_interface(iface)
+                        self.server.send_msg({
+                            "command": "parameters_changed",
+                            "parameters": [
+                                {"name": n, "value": getattr(self._params, n)}
+                                for n in changed
+                            ],
+                        })
 
                 case "set_active_interfaces":
                     requested = set(msg.get("interfaces", []))
