@@ -208,6 +208,7 @@ class MdnsScanner(BaseScanner):
                     if changed:
                         if "port" in changed or "bind_address" in changed:
                             self._mdns_listener.close()
+                            # TODO - add the cache_clear handler method here since a new socket invalidates all discoveries
                             self._mdns_listener = self._create_mdns_listener(
                                 self._params.bind_address, self._params.port
                             )
@@ -230,6 +231,7 @@ class MdnsScanner(BaseScanner):
                             logger.warning("Failed to join mDNS group on %s, interface may have disappeared", iface, exc_info=True)
                     for iface in self._active_interfaces - requested:
                         self._leave_interface(iface)
+                        # TODO - send messages about discovered devices on the interfae we are leaving
                     self.server.send_msg({
                         "command": "active_interfaces_changed",
                         "interfaces": list(self._active_interfaces),
@@ -247,8 +249,47 @@ class MdnsScanner(BaseScanner):
                     logger.warning("Unknown command from server: %r", unknown)
 
     def _handle_mdns_packet(self) -> None:
-        data, ancdata, flags, addr = self._mdns_listener.recvmsg(4096, 1024)
-        # TODO: extract ipi6_ifindex from ancdata and parse data with scapy
+        data, ancdata, flags, (src_ip, _src_port, _flowinfo, _scope_id) = self._mdns_listener.recvmsg(4096, 1024)
+
+        interface = None
+        for cmsg_level, cmsg_type, cmsg_data in ancdata:
+            if cmsg_level == socket.IPPROTO_IPV6 and cmsg_type == socket.IPV6_PKTINFO:
+                _ipi6_addr, ipi6_ifindex = struct.unpack("16sI", cmsg_data)
+                interface = socket.if_indextoname(ipi6_ifindex)
+                break
+        if interface is None:
+            logger.warning("Received mDNS packet with no IPV6_PKTINFO ancdata, dropping")
+            return
+
+        pkt = DNS(data)
+        logger.debug(
+            "[%s] mDNS from %s  qd=%d an=%d ns=%d ar=%d",
+            interface, src_ip, pkt.qdcount, pkt.ancount, pkt.nscount, pkt.arcount,
+        )
+        for i in range(pkt.qdcount):
+            qr = pkt.qd[i]
+            logger.debug(
+                "[%s]   QD: %r  type=%s  class=%d",
+                interface, qr.qname, dnstypes.get(qr.qtype, qr.qtype), qr.qclass,
+            )
+        for i in range(pkt.ancount):
+            rr = pkt.an[i]
+            logger.debug(
+                "[%s]   AN: %r  type=%s  ttl=%d  rdata=%r",
+                interface, rr.rrname, dnstypes.get(rr.type, rr.type), rr.ttl, rr.rdata,
+            )
+        for i in range(pkt.nscount):
+            rr = pkt.ns[i]
+            logger.debug(
+                "[%s]   NS: %r  type=%s  ttl=%d  rdata=%r",
+                interface, rr.rrname, dnstypes.get(rr.type, rr.type), rr.ttl, rr.rdata,
+            )
+        for i in range(pkt.arcount):
+            rr = pkt.ar[i]
+            logger.debug(
+                "[%s]   AR: %r  type=%s  ttl=%d  rdata=%r",
+                interface, rr.rrname, dnstypes.get(rr.type, rr.type), rr.ttl, rr.rdata,
+            )
 
 
 if __name__ == "__main__":
