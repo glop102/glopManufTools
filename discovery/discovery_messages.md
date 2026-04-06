@@ -330,7 +330,7 @@ Example — server accepting that announce:
 
     -> "status: accepted" (server) -> (client)
         scanners: list[dict]  (each entry contains name: str, available_interfaces: list[str],
-                               active_interfaces: list[str], parameters: dict[str, str])
+                               active_interfaces: list[str], parameters: dict[str, Any])
 
 "get_registered_scanner" (client) -> (server)
     Client names a specific scanner.
@@ -339,7 +339,7 @@ Example — server accepting that announce:
         name: str
         available_interfaces: list[str]
         active_interfaces: list[str]
-        parameters: dict[str, str]
+        parameters: dict[str, Any]
 
     -> "status: rejected" (server) -> (client)
         reason: str
@@ -369,7 +369,7 @@ Example — server accepting that announce:
     Client names a specific scanner.
 
     -> "status: accepted" (server) -> (client)
-        parameters: dict[str, str]
+        parameters: dict[str, Any]
 
     -> "status: rejected" (server) -> (client)
         reason: str
