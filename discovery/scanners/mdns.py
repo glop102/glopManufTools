@@ -2,6 +2,7 @@ import argparse
 import json
 import logging
 import socket
+import struct
 import sys
 from select import select
 from discovery.scanners.base_scanner import BaseScanner
@@ -141,22 +142,91 @@ class MdnsScanner(BaseScanner):
         self.wait_for_registration()
 
         self._mdns_listener = self._create_mdns_listener(params.bind_address, params.port)
+        self._active_interfaces: set[str] = set()
         self._keep_running = True
         try:
             while self._keep_running:
                 ready, _, _ = select([self.server, self._mdns_listener], [], [], 1.0)
 
                 if self.server in ready:
-                    logger.debug("Data available on server connection")
-                    msgs = self.server.read_msgs()
-                    # TODO: handle server commands
+                    self._handle_server_msgs()
 
                 if self._mdns_listener in ready:
-                    logger.debug("Data available on mDNS listener")
-                    data, ancdata, flags, addr = self._mdns_listener.recvmsg(4096, 1024)
-                    # TODO: parse mDNS packet and ancdata for incoming interface
+                    self._handle_mdns_packet()
         finally:
             self._mdns_listener.close()
+
+    def _join_interface(self, interface: str) -> None:
+        mreq = struct.pack(
+            "16sI",
+            socket.inet_pton(socket.AF_INET6, MDNS_ADDR6),
+            socket.if_nametoindex(interface),
+        )
+        self._mdns_listener.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_JOIN_GROUP, mreq)
+        self._active_interfaces.add(interface)
+        logger.debug("Joined mDNS multicast group on %s", interface)
+
+    def _leave_interface(self, interface: str) -> None:
+        mreq = struct.pack(
+            "16sI",
+            socket.inet_pton(socket.AF_INET6, MDNS_ADDR6),
+            socket.if_nametoindex(interface),
+        )
+        self._mdns_listener.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_LEAVE_GROUP, mreq)
+        self._active_interfaces.discard(interface)
+        logger.debug("Left mDNS multicast group on %s", interface)
+
+    def _handle_server_msgs(self) -> None:
+        try:
+            msgs = self.server.read_msgs()
+        except ConnectionError:
+            logger.info("Server connection closed, shutting down")
+            self._keep_running = False
+            return
+
+        for raw in msgs:
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                logger.warning("Non-JSON message from server: %r", raw)
+                continue
+
+            match msg.get("command"):
+                case "set_scanner_parameters":
+                    # TODO: apply parameter updates and send parameters_changed
+                    logger.debug("set_scanner_parameters: %s", msg.get("parameters"))
+
+                case "set_active_interfaces":
+                    requested = set(msg.get("interfaces", []))
+                    for iface in requested - self._active_interfaces:
+                        try:
+                            self._join_interface(iface)
+                        except OSError:
+                            logger.warning("Failed to join mDNS group on %s, interface may have disappeared", iface, exc_info=True)
+                    for iface in self._active_interfaces - requested:
+                        self._leave_interface(iface)
+                    self.server.send_msg(
+                        {
+                            "command": "active_interfaces_changed",
+                            "interfaces": list(self._active_interfaces),
+                        },
+                        send_synchronous=False,
+                    )
+
+                case "clear_cache":
+                    # TODO: clear internal result state, then repopulate via scan_results_update
+                    logger.debug("clear_cache received")
+
+                case "stop_scanner":
+                    logger.info("stop_scanner received, shutting down")
+                    self._keep_running = False
+
+                case unknown:
+                    logger.warning("Unknown command from server: %r", unknown)
+
+    def _handle_mdns_packet(self) -> None:
+        data, ancdata, flags, addr = self._mdns_listener.recvmsg(4096, 1024)
+        # TODO: extract ipi6_ifindex from ancdata and parse data with scapy
 
 
 if __name__ == "__main__":
