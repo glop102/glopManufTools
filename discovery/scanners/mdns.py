@@ -205,13 +205,10 @@ class MdnsScanner(BaseScanner):
                             logger.warning("Failed to join mDNS group on %s, interface may have disappeared", iface, exc_info=True)
                     for iface in self._active_interfaces - requested:
                         self._leave_interface(iface)
-                    self.server.send_msg(
-                        {
-                            "command": "active_interfaces_changed",
-                            "interfaces": list(self._active_interfaces),
-                        },
-                        send_synchronous=False,
-                    )
+                    self.server.send_msg({
+                        "command": "active_interfaces_changed",
+                        "interfaces": list(self._active_interfaces),
+                    })
 
                 case "clear_cache":
                     # TODO: clear internal result state, then repopulate via scan_results_update
