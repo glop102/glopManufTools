@@ -307,6 +307,20 @@ def run_tests(
     print("\n-- T16: clear_cache (valid) --")
     _send_and_expect(raw_conn, {"command": "clear_cache", "scanners": ["test"]})
     fanout = _drain(raw_conn, timeout=1.0)
+    remove_msg = _find_in_drain(fanout, "scan_results_remove", scanner="test")
+    _check("scan_results_remove fan-out received", remove_msg is not None, str(fanout))
+    _check(
+        "all three keys present in remove",
+        remove_msg is not None and len(remove_msg.get("keys", [])) == 3,
+        str(remove_msg),
+    )
+    update_msg = _find_in_drain(fanout, "scan_results_update", scanner="test")
+    _check("scan_results_update fan-out received after repopulate", update_msg is not None, str(fanout))
+    _check(
+        "three results in repopulate update",
+        update_msg is not None and len(update_msg.get("results", [])) == 3,
+        str(update_msg),
+    )
     params_msg = _find_in_drain(fanout, "parameters_changed", scanner="test")
     _check("parameters_changed fan-out received", params_msg is not None, str(fanout))
     cache_clear_entry = next(
@@ -419,24 +433,6 @@ def run_tests(
         expected_status="rejected",
     )
     _check("reason field present", "reason" in resp, str(resp))
-
-    print("\n-- T24: clear_cache fans out scan_results_remove then scan_results_update --")
-    _send_and_expect(raw_conn, {"command": "clear_cache", "scanners": ["test"]})
-    fanout = _drain(raw_conn, timeout=1.0)
-    remove_msg = _find_in_drain(fanout, "scan_results_remove", scanner="test")
-    _check("scan_results_remove fan-out received", remove_msg is not None, str(fanout))
-    _check(
-        "all three keys present in remove",
-        remove_msg is not None and len(remove_msg.get("keys", [])) == 3,
-        str(remove_msg),
-    )
-    update_msg = _find_in_drain(fanout, "scan_results_update", scanner="test")
-    _check("scan_results_update fan-out received after repopulate", update_msg is not None, str(fanout))
-    _check(
-        "three results in repopulate update",
-        update_msg is not None and len(update_msg.get("results", [])) == 3,
-        str(update_msg),
-    )
 
     print(f"\n{_passed} passed, {_failed} failed")
     return 0 if _failed == 0 else 1
