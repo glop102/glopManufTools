@@ -1,3 +1,4 @@
+import json
 import logging
 import socket
 import struct
@@ -62,14 +63,17 @@ class MsgSocket:
     def msg_data_write_queued(self) -> bool:
         return len(self._write_buf) > 0
 
-    def send_msg(self, msg: str, send_synchronous: bool = True) -> None:
+    def send_msg(self, msg: str | dict, send_synchronous: bool = True) -> None:
         """
         Send a message framed with a 4-byte big-endian length header.
+        msg may be a str or a dict; dicts are serialised to JSON automatically.
         When send_synchronous is True (default), flushes the entire write buffer
         via sendall() so the call blocks until all queued bytes are sent.
         When False, queues the bytes and flushes as much as possible without
         blocking, leaving any remainder for the next flush_write_buf() call.
         """
+        if isinstance(msg, dict):
+            msg = json.dumps(msg)
         data = msg.encode("utf-8")
         self._write_buf += struct.pack(">I", len(data)) + data
         if send_synchronous:

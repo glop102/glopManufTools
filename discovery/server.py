@@ -127,7 +127,7 @@ class DiscoveryServer:
             wait_until_exception = []
             # Timeout allows the loop condition to be checked periodically so a
             # signal handler that clears _running isn't ignored by PEP 475 syscall restart.
-            ready_to_read, ready_to_write, exceptional = select(
+            ready_to_read, ready_to_write, _exceptional = select(
                 wait_until_read, wait_until_write, wait_until_exception, 0.5
             )
 
@@ -174,16 +174,15 @@ class DiscoveryServer:
                 else:
                     logger.error(f"Unknown socket returned from select read list {s}", stack_info=True)
 
-    def _find_scanner(self, name: str) -> Optional[ScannerConnection]:
+    def _lookup_registered_scanner(self, name: str) -> Optional[ScannerConnection]:
         for sc in self.scanners:
             if sc.name == name:
                 return sc
         return None
 
     def _broadcast_to_clients(self, msg: dict) -> None:
-        raw = json.dumps(msg)
         for client in self.clients:
-            client.send_msg(raw)
+            client.send_msg(msg, send_synchronous=False)
 
     def _handle_unannounced_msgs(self, conn: MsgSocket, messages: list[str]):
         for raw in messages:
@@ -197,13 +196,13 @@ class DiscoveryServer:
                     match msg.get("type"):
                         case "scanner":
                             scanner_name = msg.get("name", "")
-                            if self._find_scanner(scanner_name) is not None:
+                            if self._lookup_registered_scanner(scanner_name) is not None:
                                 logger.warning(f"Rejected duplicate scanner announce for {scanner_name!r}")
-                                conn.send_msg(json.dumps({
+                                conn.send_msg({
                                     "command": "status",
                                     "status": "rejected",
                                     "reason": f"A scanner named {scanner_name!r} is already registered",
-                                }))
+                                }, send_synchronous=False)
                                 continue
                             self.unannounced_connections.remove(conn)
                             scanner_conn = ScannerConnection.promote(conn)
@@ -212,11 +211,11 @@ class DiscoveryServer:
                             logger.info(
                                 f"Scanner announced: {scanner_conn.name!r} with interfaces {scanner_conn.interfaces}"
                             )
-                            scanner_conn.send_msg(json.dumps({
+                            scanner_conn.send_msg({
                                 "command": "status",
                                 "status": "accepted",
                                 "server_api_version": 1,
-                            }))
+                            }, send_synchronous=False)
                             self._broadcast_to_clients({
                                 "command": "available_scanners_changed",
                                 "scanners": [sc.name for sc in self.scanners],
@@ -225,12 +224,12 @@ class DiscoveryServer:
                             self.unannounced_connections.remove(conn)
                             self.clients.append(conn)
                             logger.info("Client announced")
-                            conn.send_msg(json.dumps({
+                            conn.send_msg({
                                 "command": "status",
                                 "status": "accepted",
                                 "server_api_version": 1,
                                 "scanners": [sc.name for sc in self.scanners],
-                            }))
+                            }, send_synchronous=False)
                         case unknown:
                             logger.warning(f"Announce with unknown type: {unknown!r}")
                 case unknown:
@@ -252,161 +251,161 @@ class DiscoveryServer:
             match command:
 
                 case "get_builtin_scanners":
-                    conn.send_msg(json.dumps({
+                    conn.send_msg({
                         "command": "status",
                         "status": "accepted",
                         "scanners": list(self._builtin_scanners.keys()),
-                    }))
+                    }, send_synchronous=False)
 
                 case "get_registered_scanners":
-                    conn.send_msg(json.dumps({
+                    conn.send_msg({
                         "command": "status",
                         "status": "accepted",
                         "scanners": [sc.to_dict() for sc in self.scanners],
-                    }))
+                    }, send_synchronous=False)
 
                 case "get_registered_scanner":
-                    sc = self._find_scanner(msg.get("scanner", ""))
+                    sc = self._lookup_registered_scanner(msg.get("scanner", ""))
                     if sc is None:
-                        conn.send_msg(json.dumps({
+                        conn.send_msg({
                             "command": "status",
                             "status": "rejected",
                             "reason": f"Scanner {msg.get('scanner')!r} is not registered",
-                        }))
+                        }, send_synchronous=False)
                     else:
-                        conn.send_msg(json.dumps({"command": "status", "status": "accepted", **sc.to_dict()}))
+                        conn.send_msg({"command": "status", "status": "accepted", **sc.to_dict()}, send_synchronous=False)
 
                 case "get_scanner_available_interfaces":
-                    sc = self._find_scanner(msg.get("scanner", ""))
+                    sc = self._lookup_registered_scanner(msg.get("scanner", ""))
                     if sc is None:
-                        conn.send_msg(json.dumps({
+                        conn.send_msg({
                             "command": "status",
                             "status": "rejected",
                             "reason": f"Scanner {msg.get('scanner')!r} is not registered",
-                        }))
+                        }, send_synchronous=False)
                     else:
-                        conn.send_msg(json.dumps({
+                        conn.send_msg({
                             "command": "status",
                             "status": "accepted",
                             "interfaces": sc.interfaces,
-                        }))
+                        }, send_synchronous=False)
 
                 case "get_scanner_active_interfaces":
-                    sc = self._find_scanner(msg.get("scanner", ""))
+                    sc = self._lookup_registered_scanner(msg.get("scanner", ""))
                     if sc is None:
-                        conn.send_msg(json.dumps({
+                        conn.send_msg({
                             "command": "status",
                             "status": "rejected",
                             "reason": f"Scanner {msg.get('scanner')!r} is not registered",
-                        }))
+                        }, send_synchronous=False)
                     else:
-                        conn.send_msg(json.dumps({
+                        conn.send_msg({
                             "command": "status",
                             "status": "accepted",
                             "interfaces": sc.active_interfaces,
-                        }))
+                        }, send_synchronous=False)
 
                 case "get_scanner_parameters":
-                    sc = self._find_scanner(msg.get("scanner", ""))
+                    sc = self._lookup_registered_scanner(msg.get("scanner", ""))
                     if sc is None:
-                        conn.send_msg(json.dumps({
+                        conn.send_msg({
                             "command": "status",
                             "status": "rejected",
                             "reason": f"Scanner {msg.get('scanner')!r} is not registered",
-                        }))
+                        }, send_synchronous=False)
                     else:
-                        conn.send_msg(json.dumps({
+                        conn.send_msg({
                             "command": "status",
                             "status": "accepted",
                             "parameters": sc.parameters,
-                        }))
+                        }, send_synchronous=False)
 
                 case "set_active_interfaces":
-                    sc = self._find_scanner(msg.get("scanner", ""))
+                    sc = self._lookup_registered_scanner(msg.get("scanner", ""))
                     if sc is None:
-                        conn.send_msg(json.dumps({
+                        conn.send_msg({
                             "command": "status",
                             "status": "rejected",
                             "reason": f"Scanner {msg.get('scanner')!r} is not registered",
-                        }))
+                        }, send_synchronous=False)
                         continue
                     requested = msg.get("interfaces", [])
                     unknown = [iface for iface in requested if iface not in sc.interfaces]
                     if unknown:
-                        conn.send_msg(json.dumps({
+                        conn.send_msg({
                             "command": "status",
                             "status": "rejected",
                             "reason": f"Interfaces not reported as available by scanner: {unknown}",
                             "interfaces": unknown,
-                        }))
+                        }, send_synchronous=False)
                         continue
-                    conn.send_msg(json.dumps({"command": "status", "status": "accepted"}))
-                    sc.send_msg(json.dumps({"command": "set_active_interfaces", "interfaces": requested}))
+                    conn.send_msg({"command": "status", "status": "accepted"}, send_synchronous=False)
+                    sc.send_msg({"command": "set_active_interfaces", "interfaces": requested}, send_synchronous=False)
 
                 case "set_scanner_parameters":
-                    sc = self._find_scanner(msg.get("scanner", ""))
+                    sc = self._lookup_registered_scanner(msg.get("scanner", ""))
                     if sc is None:
-                        conn.send_msg(json.dumps({
+                        conn.send_msg({
                             "command": "status",
                             "status": "rejected",
                             "reason": f"Scanner {msg.get('scanner')!r} is not registered",
-                        }))
+                        }, send_synchronous=False)
                         continue
                     params = msg.get("parameters", [])
                     unknown = [p["name"] for p in params if p.get("name") not in sc.parameters]
                     if unknown:
-                        conn.send_msg(json.dumps({
+                        conn.send_msg({
                             "command": "status",
                             "status": "rejected",
                             "reason": f"Unknown parameter names: {unknown}",
                             "parameters": unknown,
-                        }))
+                        }, send_synchronous=False)
                         continue
-                    conn.send_msg(json.dumps({"command": "status", "status": "accepted"}))
-                    sc.send_msg(json.dumps({"command": "set_scanner_parameters", "parameters": params}))
+                    conn.send_msg({"command": "status", "status": "accepted"}, send_synchronous=False)
+                    sc.send_msg({"command": "set_scanner_parameters", "parameters": params}, send_synchronous=False)
 
                 case "stop_scanner":
-                    sc = self._find_scanner(msg.get("scanner", ""))
+                    sc = self._lookup_registered_scanner(msg.get("scanner", ""))
                     if sc is None:
-                        conn.send_msg(json.dumps({
+                        conn.send_msg({
                             "command": "status",
                             "status": "rejected",
                             "reason": f"Scanner {msg.get('scanner')!r} is not registered",
-                        }))
+                        }, send_synchronous=False)
                         continue
-                    conn.send_msg(json.dumps({"command": "status", "status": "accepted"}))
-                    sc.send_msg(json.dumps({"command": "stop_scanner"}))
+                    conn.send_msg({"command": "status", "status": "accepted"}, send_synchronous=False)
+                    sc.send_msg({"command": "stop_scanner"}, send_synchronous=False)
 
                 case "clear_cache":
                     scanner_names = msg.get("scanners", [])
-                    unknown = [name for name in scanner_names if self._find_scanner(name) is None]
+                    unknown = [name for name in scanner_names if self._lookup_registered_scanner(name) is None]
                     if unknown:
-                        conn.send_msg(json.dumps({
+                        conn.send_msg({
                             "command": "status",
                             "status": "rejected",
                             "reason": f"Scanners not registered: {unknown}",
                             "scanners": unknown,
-                        }))
+                        }, send_synchronous=False)
                         continue
-                    conn.send_msg(json.dumps({"command": "status", "status": "accepted"}))
+                    conn.send_msg({"command": "status", "status": "accepted"}, send_synchronous=False)
                     for name in scanner_names:
-                        sc = self._find_scanner(name)
+                        sc = self._lookup_registered_scanner(name)
                         assert sc is not None
-                        sc.send_msg(json.dumps({"command": "clear_cache"}))
+                        sc.send_msg({"command": "clear_cache"}, send_synchronous=False)
 
                 case "start_builtin_scanner":
                     name = msg.get("scanner", "")
                     if name not in self._builtin_scanners:
-                        conn.send_msg(json.dumps({
+                        conn.send_msg({
                             "command": "status",
                             "status": "rejected",
                             "reason": f"{name!r} is not a known built-in scanner",
-                        }))
+                        }, send_synchronous=False)
                         continue
                     module_path = self._builtin_scanners[name]
                     args = [sys.executable, "-m", module_path] + self._connection_args
                     subprocess.Popen(args, start_new_session=True)
-                    conn.send_msg(json.dumps({"command": "status", "status": "accepted"}))
+                    conn.send_msg({"command": "status", "status": "accepted"}, send_synchronous=False)
 
                 case unknown:
                     logger.warning(f"Unknown command from client: {unknown!r}")
@@ -426,7 +425,7 @@ class DiscoveryServer:
 
                 case "available_interfaces_changed":
                     scanner.interfaces = msg.get("interfaces", [])
-                    scanner.send_msg(json.dumps({"command": "status", "status": "accepted"}))
+                    scanner.send_msg({"command": "status", "status": "accepted"}, send_synchronous=False)
                     self._broadcast_to_clients({
                         "command": "available_interfaces_changed",
                         "scanner": scanner.name,
@@ -435,7 +434,7 @@ class DiscoveryServer:
 
                 case "active_interfaces_changed":
                     scanner.active_interfaces = msg.get("interfaces", [])
-                    scanner.send_msg(json.dumps({"command": "status", "status": "accepted"}))
+                    scanner.send_msg({"command": "status", "status": "accepted"}, send_synchronous=False)
                     self._broadcast_to_clients({
                         "command": "active_interfaces_changed",
                         "scanner": scanner.name,
@@ -446,7 +445,7 @@ class DiscoveryServer:
                     # Merge the list[dict] of name/value pairs into the flat parameters cache.
                     for entry in msg.get("parameters", []):
                         scanner.parameters[entry["name"]] = entry["value"]
-                    scanner.send_msg(json.dumps({"command": "status", "status": "accepted"}))
+                    scanner.send_msg({"command": "status", "status": "accepted"}, send_synchronous=False)
                     self._broadcast_to_clients({
                         "command": "parameters_changed",
                         "scanner": scanner.name,
@@ -455,7 +454,6 @@ class DiscoveryServer:
 
                 case unknown:
                     logger.warning(f"Unknown command from scanner {scanner.name!r}: {unknown!r}")
-
 
 
 if __name__ == "__main__":
