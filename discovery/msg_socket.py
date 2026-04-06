@@ -97,3 +97,5 @@ class MsgSocket:
             self._write_buf = self._write_buf[sent:]
         except BlockingIOError:
             pass
+        except OSError as e:
+            raise ConnectionError("Socket write failed") from e

@@ -134,7 +134,28 @@ class DiscoveryServer:
             )
 
             for s in ready_to_write:
-                s.flush_write_buf()
+                try:
+                    s.flush_write_buf()
+                except ConnectionError:
+                    if s in self.unannounced_connections:
+                        logger.info("Disconnecting Unannounced Connection (write error)")
+                        self.unannounced_connections.remove(s)
+                    elif s in self.clients:
+                        logger.info("Disconnecting Client Connection (write error)")
+                        self.clients.remove(s)
+                        if not self._persistent and len(self.clients) == 0:
+                            logger.info("Last client disconnected, shutting down")
+                            self.stop()
+                    elif s in self.scanners:
+                        assert isinstance(s, ScannerConnection)
+                        logger.info(f"Disconnecting Scanner {s.name!r} (write error)")
+                        self.scanners.remove(s)
+                        self._broadcast_to_clients(
+                            {
+                                "command": "available_scanners_changed",
+                                "scanners": [sc.name for sc in self.scanners],
+                            }
+                        )
 
             for s in ready_to_read:
                 if s == self.socket:
