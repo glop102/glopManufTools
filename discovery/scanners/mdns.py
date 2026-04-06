@@ -16,11 +16,13 @@ TYPE_TXT = 16
 TYPE_AAAA = 28
 TYPE_SRV = 33
 
+
 class MDNSResponseRecord(BaseModel):
     """
     Individual response records seen on the wire.
     This is only planned on being used internally to cache values.
     """
+
     interface: str
     src_ip: str
     rrname: str
@@ -46,6 +48,7 @@ class MDNSServiceData(BaseModel):
     A single service with attached metadata about that service.
     This should be contained under a Host as services only make sense combined with a host.
     """
+
     instance_name: str
     service_type: str
     port: Optional[int] = None
@@ -64,6 +67,7 @@ class MDNSHostData(BaseModel):
     """
     A Host that has reported services being available.
     """
+
     interface: str
     hostname: str
     addresses: list[str] = []
@@ -76,6 +80,7 @@ class MDNSHostData(BaseModel):
 
     def __hash__(self) -> int:
         return hash((self.interface, self.hostname))
+
 
 class MdnsScanner(BaseScanner):
     def start(self, args: list[str]):

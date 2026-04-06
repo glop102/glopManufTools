@@ -3,7 +3,7 @@ def _parse_tcp_socket(value: str) -> tuple[str, int]:
     if value.startswith("["):
         bracket_end = value.index("]")
         host = value[1:bracket_end]
-        port = int(value[bracket_end + 2:])
+        port = int(value[bracket_end + 2 :])
     else:
         host, _, port_str = value.rpartition(":")
         port = int(port_str)

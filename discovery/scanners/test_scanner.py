@@ -33,52 +33,97 @@ def _recv_one(sock, timeout: float = 5.0) -> dict:
         raise RuntimeError("Connection closed before a message was received")
     return json.loads(msgs[0])
 
+
 logger = logging.getLogger("TestScanner")
 
 # Fake hosts preserved for future discovery reporting tests.
 _FAKE_HOSTS = [
-    MDNSHostData.model_validate({
-        "hostname": "router.local.",
-        "addresses": ["192.168.1.1", "fd00::1"],
-        "interface": "eth0",
-        "services": [
-            {"instance_name": "router HTTP", "service_type": "_http._tcp", "port": 80, "txt": {}},
-        ],
-    }),
-    MDNSHostData.model_validate({
-        "hostname": "printer.local.",
-        "addresses": ["192.168.1.50"],
-        "interface": "eth0",
-        "services": [
-            {"instance_name": "Office Printer", "service_type": "_ipp._tcp", "port": 631, "txt": {"ty": "LaserJet"}},
-        ],
-    }),
-    MDNSHostData.model_validate({
-        "hostname": "nas.local.",
-        "interface": "eth0",
-        "addresses": ["192.168.1.10"],
-        "services": [
-            {"instance_name": "NAS SMB",  "service_type": "_smb._tcp",  "port": 445, "txt": {}},
-            {"instance_name": "NAS HTTP", "service_type": "_http._tcp", "port": 8080, "txt": {"path": "/ui"}},
-        ],
-    }),
+    MDNSHostData.model_validate(
+        {
+            "hostname": "router.local.",
+            "addresses": ["192.168.1.1", "fd00::1"],
+            "interface": "eth0",
+            "services": [
+                {
+                    "instance_name": "router HTTP",
+                    "service_type": "_http._tcp",
+                    "port": 80,
+                    "txt": {},
+                },
+            ],
+        }
+    ),
+    MDNSHostData.model_validate(
+        {
+            "hostname": "printer.local.",
+            "addresses": ["192.168.1.50"],
+            "interface": "eth0",
+            "services": [
+                {
+                    "instance_name": "Office Printer",
+                    "service_type": "_ipp._tcp",
+                    "port": 631,
+                    "txt": {"ty": "LaserJet"},
+                },
+            ],
+        }
+    ),
+    MDNSHostData.model_validate(
+        {
+            "hostname": "nas.local.",
+            "interface": "eth0",
+            "addresses": ["192.168.1.10"],
+            "services": [
+                {
+                    "instance_name": "NAS SMB",
+                    "service_type": "_smb._tcp",
+                    "port": 445,
+                    "txt": {},
+                },
+                {
+                    "instance_name": "NAS HTTP",
+                    "service_type": "_http._tcp",
+                    "port": 8080,
+                    "txt": {"path": "/ui"},
+                },
+            ],
+        }
+    ),
 ]
 
 
 class TestScanner(BaseScanner):
     def start(self, args: list[str]) -> None:
         parser = argparse.ArgumentParser(description="Test scanner")
-        parser.add_argument("--interval", type=float, default=2.0,
-                            help="select() timeout in seconds between heartbeat ticks")
-        parser.add_argument("--available-interfaces", default="eth0,wlan0",
-                            help="Comma-separated fake interface list to report as available")
-        parser.add_argument("--active-interfaces", default="",
-                            help="Comma-separated interfaces to report as initially active")
-        parser.add_argument("--no-emit-available-on-start", dest="emit_available_on_start",
-                            action="store_false", default=True,
-                            help="Suppress the available_interfaces_changed sent after announce")
-        parser.add_argument("--stop-delay", type=float, default=0.0,
-                            help="Seconds to wait before exiting after receiving stop_scanner")
+        parser.add_argument(
+            "--interval",
+            type=float,
+            default=2.0,
+            help="select() timeout in seconds between heartbeat ticks",
+        )
+        parser.add_argument(
+            "--available-interfaces",
+            default="eth0,wlan0",
+            help="Comma-separated fake interface list to report as available",
+        )
+        parser.add_argument(
+            "--active-interfaces",
+            default="",
+            help="Comma-separated interfaces to report as initially active",
+        )
+        parser.add_argument(
+            "--no-emit-available-on-start",
+            dest="emit_available_on_start",
+            action="store_false",
+            default=True,
+            help="Suppress the available_interfaces_changed sent after announce",
+        )
+        parser.add_argument(
+            "--stop-delay",
+            type=float,
+            default=0.0,
+            help="Seconds to wait before exiting after receiving stop_scanner",
+        )
         parsed = parser.parse_args(args)
 
         try:
@@ -102,17 +147,23 @@ class TestScanner(BaseScanner):
             "cache_clear_count": cache_clear_count,
         }
 
-        _send(self.server,{
-            "command": "announce",
-            "type": "scanner",
-            "name": "test",
-            "interfaces": available,
-            "parameters": initial_parameters,
-        })
+        _send(
+            self.server,
+            {
+                "command": "announce",
+                "type": "scanner",
+                "name": "test",
+                "interfaces": available,
+                "parameters": initial_parameters,
+            },
+        )
         self.wait_for_registration()
 
         if parsed.emit_available_on_start:
-            _send(self.server,{"command": "available_interfaces_changed", "interfaces": available})
+            _send(
+                self.server,
+                {"command": "available_interfaces_changed", "interfaces": available},
+            )
             _recv_one(self.server)
 
         self._continue_running = True
@@ -138,7 +189,6 @@ class TestScanner(BaseScanner):
                 command = msg.get("command")
 
                 match command:
-
                     case "set_scanner_parameters":
                         changed_params = []
                         emit_available = False
@@ -162,29 +212,61 @@ class TestScanner(BaseScanner):
                                 parsed.stop_delay = float(value)
 
                         if emit_available:
-                            _send(self.server,{"command": "available_interfaces_changed", "interfaces": available})
+                            _send(
+                                self.server,
+                                {
+                                    "command": "available_interfaces_changed",
+                                    "interfaces": available,
+                                },
+                            )
                             _recv_one(self.server)
 
                         if emit_active:
-                            _send(self.server,{"command": "active_interfaces_changed", "interfaces": active})
+                            _send(
+                                self.server,
+                                {
+                                    "command": "active_interfaces_changed",
+                                    "interfaces": active,
+                                },
+                            )
                             _recv_one(self.server)
 
-                        _send(self.server,{"command": "parameters_changed", "parameters": changed_params})
+                        _send(
+                            self.server,
+                            {
+                                "command": "parameters_changed",
+                                "parameters": changed_params,
+                            },
+                        )
                         _recv_one(self.server)
 
                     case "set_active_interfaces":
                         active = msg.get("interfaces", [])
                         initial_parameters["active_interfaces"] = ",".join(active)
-                        _send(self.server,{"command": "active_interfaces_changed", "interfaces": active})
+                        _send(
+                            self.server,
+                            {
+                                "command": "active_interfaces_changed",
+                                "interfaces": active,
+                            },
+                        )
                         _recv_one(self.server)
 
                     case "clear_cache":
                         cache_clear_count += 1
                         initial_parameters["cache_clear_count"] = cache_clear_count
-                        _send(self.server,{
-                            "command": "parameters_changed",
-                            "parameters": [{"name": "cache_clear_count", "value": cache_clear_count}],
-                        })
+                        _send(
+                            self.server,
+                            {
+                                "command": "parameters_changed",
+                                "parameters": [
+                                    {
+                                        "name": "cache_clear_count",
+                                        "value": cache_clear_count,
+                                    }
+                                ],
+                            },
+                        )
                         _recv_one(self.server)
 
                     case "stop_scanner":

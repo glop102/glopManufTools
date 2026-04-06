@@ -62,10 +62,15 @@ class BaseScanner(ABC):
         assert self.server is not None
         ready, _, _ = select([self.server], [], [], timeout)
         if not ready:
-            raise RuntimeError("Timed out waiting for registered confirmation from server")
+            raise RuntimeError(
+                "Timed out waiting for registered confirmation from server"
+            )
         msgs = self.server.read_msgs()
         registered = json.loads(msgs[0]) if msgs else {}
-        if registered.get("command") != "status" or registered.get("status") != "accepted":
+        if (
+            registered.get("command") != "status"
+            or registered.get("status") != "accepted"
+        ):
             raise RuntimeError(f"Expected status accepted, got: {registered!r}")
 
     def connect_to_server(self):
