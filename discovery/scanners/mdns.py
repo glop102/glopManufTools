@@ -83,9 +83,12 @@ class MDNSHostData(BaseModel):
 
 
 class MdnsScanner(BaseScanner):
+    def stop(self) -> None:
+        pass
+
     def start(self, args: list[str]):
         self.connect_to_server()
-        if self.server == None:
+        if self.server is None:
             raise RuntimeError(
                 "Scanner returned from connect_to_server() without a valid self.server instance"
             )
@@ -95,11 +98,11 @@ class MdnsScanner(BaseScanner):
             "command": "announce",
             "type": "scanner",
             "name": "mdns.v1",
-            "parameters": [],
+            "parameters": {},
             "interfaces": interfaces,
         }
         self.server.send_msg(json.dumps(announce))
-        # TODO - check if the server connection closed and then exit
+        self.wait_for_registration()
 
 
 if __name__ == "__main__":
