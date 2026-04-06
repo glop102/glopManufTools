@@ -1,6 +1,9 @@
 import json
+import logging
 import socket
+import struct
 import sys
+import threading
 from discovery.scanners.base_scanner import BaseScanner
 from typing import Optional
 
@@ -9,6 +12,8 @@ from scapy.layers.dns import DNS, DNSQR, dnstypes
 
 MDNS_ADDR6 = "ff02::fb"
 MDNS_PORT = 5353
+
+logger = logging.getLogger("discovery.mdns")
 
 TYPE_A = 1
 TYPE_PTR = 12
@@ -83,8 +88,92 @@ class MDNSHostData(BaseModel):
 
 
 class MdnsScanner(BaseScanner):
+    def __init__(self) -> None:
+        self._listener_stop_events: dict[str, threading.Event] = {}
+        self._listener_threads: dict[str, threading.Thread] = {}
+
     def stop(self) -> None:
-        pass
+        for event in self._listener_stop_events.values():
+            event.set()
+
+    def start_interface_listener(self, interface: str) -> None:
+        """
+        Spawn a background thread that joins the mDNS multicast group on the
+        named interface and logs every received packet at DEBUG level.
+        Calling this a second time for the same interface is a no-op.
+        """
+        if interface in self._listener_threads:
+            logger.warning("mDNS listener already running on %s", interface)
+            return
+        stop_event = threading.Event()
+        t = threading.Thread(
+            target=self._listen_on_interface,
+            args=(interface, stop_event),
+            name=f"mdns-listener-{interface}",
+            daemon=True,
+        )
+        self._listener_stop_events[interface] = stop_event
+        self._listener_threads[interface] = t
+        t.start()
+
+    def _listen_on_interface(self, interface: str, stop_event: threading.Event) -> None:
+        sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            # Bind the socket to this specific interface before joining multicast
+            # so we only receive traffic that arrived on it.
+            sock.setsockopt(
+                socket.SOL_SOCKET, socket.SO_BINDTODEVICE, interface.encode()
+            )
+            sock.bind(("", MDNS_PORT))
+            # Join the IPv6 mDNS multicast group. The interface index in the
+            # ipv6_mreq struct scopes the link-local membership to this interface.
+            mreq = struct.pack(
+                "16sI",
+                socket.inet_pton(socket.AF_INET6, MDNS_ADDR6),
+                socket.if_nametoindex(interface),
+            )
+            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_JOIN_GROUP, mreq)
+            sock.settimeout(1.0)
+            logger.debug("mDNS listener started on %s", interface)
+
+            while not stop_event.is_set():
+                try:
+                    data, (src_ip, _src_port, _flowinfo, _scope_id) = sock.recvfrom(4096)
+                except TimeoutError:
+                    continue
+
+                pkt = DNS(data)
+                logger.debug(
+                    "[%s] mDNS from %s  questions=%d answers=%d additional=%d",
+                    interface, src_ip, pkt.qdcount, pkt.ancount, pkt.arcount,
+                )
+                for i in range(pkt.qdcount):
+                    qr = pkt.qd[i]
+                    logger.debug(
+                        "[%s]   QD: %r  type=%s",
+                        interface, qr.qname, dnstypes.get(qr.qtype, qr.qtype),
+                    )
+                for i in range(pkt.ancount):
+                    rr = pkt.an[i]
+                    logger.debug(
+                        "[%s]   AN: %r  type=%s  ttl=%d  rdata=%r",
+                        interface, rr.rrname, dnstypes.get(rr.type, rr.type),
+                        rr.ttl, rr.rdata,
+                    )
+                for i in range(pkt.arcount):
+                    rr = pkt.ar[i]
+                    logger.debug(
+                        "[%s]   AR: %r  type=%s  ttl=%d  rdata=%r",
+                        interface, rr.rrname, dnstypes.get(rr.type, rr.type),
+                        rr.ttl, rr.rdata,
+                    )
+        except Exception as e:
+            logger.error("mDNS listener error on %s", interface, exc_info=e)
+        finally:
+            sock.close()
+            logger.debug("mDNS listener stopped on %s", interface)
 
     def start(self, args: list[str]):
         self.connect_to_server()
