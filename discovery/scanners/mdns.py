@@ -1,3 +1,4 @@
+import argparse
 import json
 import logging
 import socket
@@ -90,7 +91,7 @@ class MdnsScanner(BaseScanner):
     def stop(self) -> None:
         self._keep_running = False
 
-    def _create_mdns_listener(self) -> socket.socket:
+    def _create_mdns_listener(self, bind_address: str, port: int) -> socket.socket:
         """
         Create and return the mDNS listening socket without joining any multicast
         groups. IPV6_RECVPKTINFO is enabled so that recvmsg() will return an
@@ -102,10 +103,24 @@ class MdnsScanner(BaseScanner):
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_RECVPKTINFO, 1)
-        sock.bind(("", MDNS_PORT))
+        sock.bind((bind_address, port))
         return sock
 
     def start(self, args: list[str]):
+        parser = argparse.ArgumentParser(description="mDNS scanner")
+        parser.add_argument(
+            "--port",
+            type=int,
+            default=MDNS_PORT,
+            help=f"UDP port to listen on (default: {MDNS_PORT})",
+        )
+        parser.add_argument(
+            "--bind-address",
+            default="",
+            help="IPv6 address to bind to (default: :: — all interfaces)",
+        )
+        params = parser.parse_args(args)
+
         self.connect_to_server()
         if self.server is None:
             raise RuntimeError(
@@ -116,13 +131,16 @@ class MdnsScanner(BaseScanner):
             "command": "announce",
             "type": "scanner",
             "name": "mdns.v1",
-            "parameters": {},
+            "parameters": {
+                "port": params.port,
+                "bind_address": params.bind_address,
+            },
             "interfaces": interfaces,
         }
         self.server.send_msg(json.dumps(announce))
         self.wait_for_registration()
 
-        self._mdns_listener = self._create_mdns_listener()
+        self._mdns_listener = self._create_mdns_listener(params.bind_address, params.port)
         self._keep_running = True
         try:
             while self._keep_running:
