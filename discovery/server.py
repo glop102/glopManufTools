@@ -1,5 +1,4 @@
 import argparse
-import importlib
 import json
 import os
 import signal
@@ -405,8 +404,7 @@ class DiscoveryServer:
                         }))
                         continue
                     module_path = self._builtin_scanners[name]
-                    module = importlib.import_module(module_path)
-                    args = [sys.executable, module.__file__] + self._connection_args
+                    args = [sys.executable, "-m", module_path] + self._connection_args
                     subprocess.Popen(args, start_new_session=True)
                     conn.send_msg(json.dumps({"command": "status", "status": "accepted"}))
 

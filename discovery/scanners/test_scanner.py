@@ -55,10 +55,11 @@ _FAKE_HOSTS = [
     }),
     MDNSHostData.model_validate({
         "hostname": "nas.local.",
+        "interface": "eth0",
         "addresses": ["192.168.1.10"],
         "services": [
-            {"name": "NAS SMB",  "type": "_smb._tcp",  "port": 445, "txt": {}},
-            {"name": "NAS HTTP", "type": "_http._tcp", "port": 8080, "txt": {"path": "/ui"}},
+            {"instance_name": "NAS SMB",  "service_type": "_smb._tcp",  "port": 445, "txt": {}},
+            {"instance_name": "NAS HTTP", "service_type": "_http._tcp", "port": 8080, "txt": {"path": "/ui"}},
         ],
     }),
 ]
@@ -122,7 +123,12 @@ class TestScanner(BaseScanner):
                 # Heartbeat tick — reserved for future use.
                 continue
 
-            for raw in self.server.read_msgs():
+            try:
+                msgs = self.server.read_msgs()
+            except ConnectionError:
+                logger.info("Server connection closed, shutting down")
+                break
+            for raw in msgs:
                 try:
                     msg = json.loads(raw)
                 except json.JSONDecodeError:

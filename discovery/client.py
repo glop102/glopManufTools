@@ -76,9 +76,7 @@ class DiscoveryClient(MsgSocket):
         unix_socket_path: Optional[Path],
         tcp_socket: Optional[tuple[str, int]],
     ) -> None:
-        from . import server as server_module
-
-        args = [sys.executable, server_module.__file__]
+        args = [sys.executable, "-m", "discovery.server"]
         if tcp_socket:
             host, port = tcp_socket
             # Bracket IPv6 addresses to match HOST:PORT argparse convention
