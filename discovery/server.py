@@ -28,12 +28,14 @@ class ScannerConnection(MsgSocket):
         self.parameters: dict = {}
         self.interfaces: list[str] = []
         self.active_interfaces: list[str] = []
+        self.results: dict[str, dict] = {}  # key -> serialized result dict
 
     def first_connection_setup(self, announce_message: dict) -> None:
         self.name = announce_message.get("name", "")
         self.parameters = announce_message.get("parameters", {})
         self.interfaces = announce_message.get("interfaces", [])
         self.active_interfaces = []
+        self.results = {}
 
     def to_dict(self) -> dict:
         return {
@@ -487,7 +489,55 @@ class DiscoveryServer:
                     for name in scanner_names:
                         sc = self._lookup_registered_scanner(name)
                         assert sc is not None
+                        if sc.results:
+                            keys = list(sc.results.keys())
+                            sc.results.clear()
+                            self._broadcast_to_clients({
+                                "command": "scan_results_remove",
+                                "scanner": name,
+                                "keys": keys,
+                            })
                         sc.send_msg({"command": "clear_cache"}, send_synchronous=False)
+
+                case "get_results":
+                    sc = self._lookup_registered_scanner(msg.get("scanner", ""))
+                    if sc is None:
+                        conn.send_msg({
+                            "command": "status",
+                            "status": "rejected",
+                            "reason": f"Scanner {msg.get('scanner')!r} is not registered",
+                        }, send_synchronous=False)
+                    else:
+                        conn.send_msg({
+                            "command": "status",
+                            "status": "accepted",
+                            "results": [{"key": k, "result": v} for k, v in sc.results.items()],
+                        }, send_synchronous=False)
+
+                case "get_result":
+                    sc = self._lookup_registered_scanner(msg.get("scanner", ""))
+                    if sc is None:
+                        conn.send_msg({
+                            "command": "status",
+                            "status": "rejected",
+                            "reason": f"Scanner {msg.get('scanner')!r} is not registered",
+                        }, send_synchronous=False)
+                    else:
+                        key = msg.get("key", "")
+                        result = sc.results.get(key)
+                        if result is None:
+                            conn.send_msg({
+                                "command": "status",
+                                "status": "rejected",
+                                "reason": f"Key {key!r} not found in scanner {sc.name!r}",
+                            }, send_synchronous=False)
+                        else:
+                            conn.send_msg({
+                                "command": "status",
+                                "status": "accepted",
+                                "key": key,
+                                "result": result,
+                            }, send_synchronous=False)
 
                 case "start_builtin_scanner":
                     name = msg.get("scanner", "")
@@ -562,13 +612,41 @@ class DiscoveryServer:
                         {"command": "status", "status": "accepted"},
                         send_synchronous=False,
                     )
-                    self._broadcast_to_clients(
-                        {
-                            "command": "parameters_changed",
-                            "scanner": scanner.name,
-                            "parameters": msg.get("parameters", []),
-                        }
+                    self._broadcast_to_clients({
+                        "command": "parameters_changed",
+                        "scanner": scanner.name,
+                        "parameters": msg.get("parameters", []),
+                    })
+
+                case "scan_results_update":
+                    for item in msg.get("results", []):
+                        key = item.get("key")
+                        result = item.get("result")
+                        if key is not None and result is not None:
+                            scanner.results[key] = result
+                    scanner.send_msg(
+                        {"command": "status", "status": "accepted"},
+                        send_synchronous=False,
                     )
+                    self._broadcast_to_clients({
+                        "command": "scan_results_update",
+                        "scanner": scanner.name,
+                        "results": msg.get("results", []),
+                    })
+
+                case "scan_results_remove":
+                    keys = msg.get("keys", [])
+                    for key in keys:
+                        scanner.results.pop(key, None)
+                    scanner.send_msg(
+                        {"command": "status", "status": "accepted"},
+                        send_synchronous=False,
+                    )
+                    self._broadcast_to_clients({
+                        "command": "scan_results_remove",
+                        "scanner": scanner.name,
+                        "keys": keys,
+                    })
 
                 case unknown:
                     logger.warning(

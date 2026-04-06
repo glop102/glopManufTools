@@ -14,10 +14,19 @@ import logging
 import signal
 import sys
 import time
+import uuid
 from select import select
+
+from pydantic import BaseModel
 
 from discovery.scanners.base_scanner import BaseScanner
 from discovery.scanners.mdns import MDNSHostData, MDNSServiceData
+
+
+class TestResult(BaseModel):
+    name: str
+    value: str
+    tags: list[str] = []
 
 
 def _send(sock, msg: dict) -> None:
@@ -138,6 +147,12 @@ class TestScanner(BaseScanner):
         active = [i for i in parsed.active_interfaces.split(",") if i]
         cache_clear_count = 0
 
+        fake_results: dict[str, TestResult] = {
+            str(uuid.uuid4()): TestResult(name="device-alpha", value="192.168.1.100", tags=["printer"]),
+            str(uuid.uuid4()): TestResult(name="device-beta", value="192.168.1.101", tags=["nas", "storage"]),
+            str(uuid.uuid4()): TestResult(name="device-gamma", value="192.168.1.102", tags=[]),
+        }
+
         initial_parameters = {
             "interval": parsed.interval,
             "available_interfaces": parsed.available_interfaces,
@@ -165,6 +180,12 @@ class TestScanner(BaseScanner):
                 {"command": "available_interfaces_changed", "interfaces": available},
             )
             _recv_one(self.server)
+
+        _send(self.server, {
+            "command": "scan_results_update",
+            "results": [{"key": k, "result": v.model_dump()} for k, v in fake_results.items()],
+        })
+        _recv_one(self.server)
 
         self._continue_running = True
 
@@ -267,6 +288,11 @@ class TestScanner(BaseScanner):
                                 ],
                             },
                         )
+                        _recv_one(self.server)
+                        _send(self.server, {
+                            "command": "scan_results_update",
+                            "results": [{"key": k, "result": v.model_dump()} for k, v in fake_results.items()],
+                        })
                         _recv_one(self.server)
 
                     case "stop_scanner":

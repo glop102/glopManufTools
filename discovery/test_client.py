@@ -15,11 +15,16 @@ import argparse
 import json
 import sys
 import time
+from collections import deque
 from pathlib import Path
 from select import select
 from typing import Optional
 
 from discovery.client import DiscoveryClient
+
+# read_msgs() greedily drains the socket buffer and may return multiple messages
+# in one call. _recv_one only needs one, so extras are parked here for _drain.
+_overflow: deque[dict] = deque()
 
 
 def _send(sock, msg: dict) -> None:
@@ -27,12 +32,15 @@ def _send(sock, msg: dict) -> None:
 
 
 def _recv_one(sock, timeout: float = 5.0) -> dict:
+    if _overflow:
+        return _overflow.popleft()
     ready, _, _ = select([sock], [], [], timeout)
     if not ready:
         raise RuntimeError(f"Timed out after {timeout}s waiting for a message")
     msgs = sock.read_msgs()
     if not msgs:
         raise RuntimeError("Connection closed before a message was received")
+    _overflow.extend(json.loads(m) for m in msgs[1:])
     return json.loads(msgs[0])
 
 
@@ -49,7 +57,8 @@ def _send_and_expect(
 
 
 def _drain(sock, timeout: float = 0.3) -> list[dict]:
-    collected: list[dict] = []
+    collected = list(_overflow)
+    _overflow.clear()
     while True:
         ready, _, _ = select([sock], [], [], timeout)
         if not ready:
@@ -384,6 +393,49 @@ def run_tests(
             if m.get("command") == "available_scanners_changed"
         ),
         str(fanout),
+    )
+
+    # Drain any remaining fan-out from T20 (available_interfaces_changed + scan_results_update)
+    _drain(raw_conn, timeout=1.0)
+
+    print("\n-- T21: get_results --")
+    resp = _send_and_expect(raw_conn, {"command": "get_results", "scanner": "test"})
+    results = resp.get("results", [])
+    _check("three results in cache", len(results) == 3, str(results))
+    _check("each result has key and result fields", all("key" in r and "result" in r for r in results), str(results))
+    first_key = results[0]["key"] if results else None
+
+    print("\n-- T22: get_result (valid key) --")
+    if first_key:
+        resp = _send_and_expect(raw_conn, {"command": "get_result", "scanner": "test", "key": first_key})
+        _check("key field present", "key" in resp, str(resp))
+        _check("result field present", "result" in resp, str(resp))
+        _check("name field in result", "name" in resp.get("result", {}), str(resp))
+
+    print("\n-- T23: get_result (unknown key) --")
+    resp = _send_and_expect(
+        raw_conn,
+        {"command": "get_result", "scanner": "test", "key": "no-such-key"},
+        expected_status="rejected",
+    )
+    _check("reason field present", "reason" in resp, str(resp))
+
+    print("\n-- T24: clear_cache fans out scan_results_remove then scan_results_update --")
+    _send_and_expect(raw_conn, {"command": "clear_cache", "scanners": ["test"]})
+    fanout = _drain(raw_conn, timeout=1.0)
+    remove_msg = _find_in_drain(fanout, "scan_results_remove", scanner="test")
+    _check("scan_results_remove fan-out received", remove_msg is not None, str(fanout))
+    _check(
+        "all three keys present in remove",
+        remove_msg is not None and len(remove_msg.get("keys", [])) == 3,
+        str(remove_msg),
+    )
+    update_msg = _find_in_drain(fanout, "scan_results_update", scanner="test")
+    _check("scan_results_update fan-out received after repopulate", update_msg is not None, str(fanout))
+    _check(
+        "three results in repopulate update",
+        update_msg is not None and len(update_msg.get("results", [])) == 3,
+        str(update_msg),
     )
 
     print(f"\n{_passed} passed, {_failed} failed")

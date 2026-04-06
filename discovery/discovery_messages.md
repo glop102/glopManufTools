@@ -51,6 +51,18 @@ Example — server accepting that announce:
     fields: parameters: list[dict]
     Sent when one or more parameter values have changed.
 
+"scan_results_update"
+    fields: results: list[dict]
+    Sent when one or more discovered items are new or have changed. Each entry in results
+    has a "key" (str, scanner-defined unique identifier) and a "result" (dict, the
+    serialized scanner-specific result model). Semantics are upsert — sending an existing
+    key replaces the cached entry.
+
+"scan_results_remove"
+    fields: keys: list[str]
+    Sent when one or more previously reported items are no longer present. keys is the
+    list of scanner-defined identifiers to remove from the cache.
+
 
 ### Client -> Server
 
@@ -64,7 +76,8 @@ Example — server accepting that announce:
 
 "clear_cache"
     fields: scanners
-    Request that the server and the named scanners clear their discovery caches.
+    Request that the server clear its result cache for the named scanners and forward the
+    clear request to each scanner so it can repopulate.
 
 "set_scanner_parameters"
     fields: scanner, parameters: list[dict]
@@ -102,6 +115,14 @@ Example — server accepting that announce:
     fields: scanner
     Request the current parameter values for the named scanner.
 
+"get_results"
+    fields: scanner
+    Request the full cached result set for the named scanner.
+
+"get_result"
+    fields: scanner, key
+    Request a single cached result by its key from the named scanner.
+
 
 ### Server -> Scanner
 
@@ -115,8 +136,9 @@ Example — server accepting that announce:
 
 "clear_cache"
     fields: (none)
-    Forwarded from a client clear_cache request after validation. Scanner should clear
-    its discovery cache.
+    Sent after the server has already cleared its own result cache and broadcast
+    scan_results_remove to all clients. Scanner should clear its internal state and
+    repopulate by sending scan_results_update.
 
 "set_active_interfaces"
     fields: interfaces
@@ -142,6 +164,17 @@ Example — server accepting that announce:
 "parameters_changed"
     fields: scanner, parameters: list[dict]
     Forwarded to all clients when a scanner reports its parameter values have changed.
+
+"scan_results_update"
+    fields: scanner, results: list[dict]
+    Forwarded to all clients when a scanner reports new or updated results. Each entry has
+    "key" (str) and "result" (dict). Clients should deserialize "result" using the
+    scanner-specific result type (e.g. discovery.scanners.mdns.MDNSHostData).
+
+"scan_results_remove"
+    fields: scanner, keys: list[str]
+    Forwarded to all clients when a scanner reports results are gone, or immediately when
+    the server processes a clear_cache request (before the scanner repopulates).
 
 "status"
     fields: status, [reason], [...]
@@ -343,21 +376,79 @@ Example — server accepting that announce:
         Named scanner was not found.
 
 
+### Discovery Results
+
+"scan_results_update" (scanner) -> (server)
+    Scanner reports one or more new or updated discovered items. Upsert semantics —
+    an existing key is replaced.
+
+    -> "status: accepted" (server) -> (scanner)
+        (no extra fields)
+
+    -> "scan_results_update" (server) -> (all clients)
+        scanner: str
+        results: list[dict]  (each entry has "key": str and "result": dict)
+
+"scan_results_remove" (scanner) -> (server)
+    Scanner reports that one or more previously reported items are no longer present.
+
+    -> "status: accepted" (server) -> (scanner)
+        (no extra fields)
+
+    -> "scan_results_remove" (server) -> (all clients)
+        scanner: str
+        keys: list[str]
+
+"get_results" (client) -> (server)
+    Client requests the full cached result set for a named scanner.
+
+    -> "status: accepted" (server) -> (client)
+        results: list[dict]  (each entry has "key": str and "result": dict)
+
+    -> "status: rejected" (server) -> (client)
+        reason: str
+        Named scanner was not found.
+
+"get_result" (client) -> (server)
+    Client requests a single cached result by key from a named scanner.
+
+    -> "status: accepted" (server) -> (client)
+        key: str
+        result: dict
+
+    -> "status: rejected" (server) -> (client)
+        reason: str
+        Named scanner was not found, or key does not exist in its cache.
+
+Result types are scanner-specific pydantic models. Clients import the type from the scanner
+module and call model_validate() on the "result" dict received from the server:
+
+    from discovery.scanners.mdns import MDNSHostData
+    host = MDNSHostData.model_validate(result_dict)
+
+
 ### Cache Control
 
 "clear_cache" (client) -> (server)
-    Client requests that the server and a set of named scanners clear their discovery caches.
+    Client requests that the result cache for a set of named scanners be cleared.
     Server validates that every named scanner is currently registered.
 
     -> "status: accepted" (server) -> (client)
         (no extra fields)
-        Server clears its own cache and forwards the command to each named scanner.
 
-        -> "clear_cache" (server) -> (each named scanner)
-            (no extra fields)
-            Fire-and-forget. The scanner clears its state and reports all previously
-            discovered hosts as offline through the normal discovery reporting path,
-            which is the mechanism that drives the actual cache clear.
+    For each named scanner, in order:
+
+    -> "scan_results_remove" (server) -> (all clients)
+        scanner: str
+        keys: list[str]  (all keys currently in the server's cache for that scanner)
+        Server immediately fans out the full removal list and clears its own cache.
+        Only sent if the cache was non-empty.
+
+    -> "clear_cache" (server) -> (scanner)
+        (no extra fields)
+        Server forwards the clear to the scanner after its own cache is already empty.
+        Scanner should clear its internal state and repopulate by sending
+        scan_results_update, which will rebuild the server cache and fan out to clients.
 
     -> "status: rejected" (server) -> (client)
         reason: str
