@@ -313,8 +313,12 @@ class MdnsScanner(BaseScanner):
                 case unknown:
                     logger.warning("Unknown command from server: %r", unknown)
 
-    def _process_rr(self, interface: str, src_ip: str, rr: DNSRecord, now: float) -> None:
-        """Upsert or remove one DNS resource record in the internal cache."""
+    def _process_rr(self, interface: str, src_ip: str, rr: DNSRecord, now: float) -> str | None:
+        """
+        Upsert or remove one DNS resource record in the internal cache.
+        Returns the rrname if the cache changed meaningfully (record added, removed,
+        or content updated), or None for a TTL-only refresh with no data change.
+        """
         rrname = rr.rrname.decode("utf-8", errors="replace")
         common = dict(interface=interface, src_ip=src_ip, rrname=rrname, ttl=rr.ttl, received_at=now)
 
@@ -334,15 +338,35 @@ class MdnsScanner(BaseScanner):
             record = MDNSSRVRecord(**common, priority=srv.priority, weight=srv.weight, port=srv.port, target=target)
         else:
             logger.debug("[%s] skipping unsupported record type %s", interface, dnstypes.get(rr.type, rr.type))
-            return
+            return None
 
         if rr.ttl == 0:
             # Goodbye packet — the sender is withdrawing this record.
-            self._record_cache.discard(record)
-            logger.debug("[%s] removed record %r %s", interface, rrname, dnstypes.get(rr.type, rr.type))
-        else:
-            self._record_cache.discard(record)
+            if record in self._record_cache:
+                self._record_cache.discard(record)
+                logger.debug("[%s] removed record %r %s", interface, rrname, dnstypes.get(rr.type, rr.type))
+                return rrname
+            return None
+
+        existing = next((r for r in self._record_cache if r == record), None)
+        if existing is None:
             self._record_cache.add(record)
+            return rrname
+
+        # Record already exists. For A/AAAA/PTR the data is part of the identity key,
+        # so equal records are always identical — this is just a TTL refresh.
+        # For TXT and SRV the identity key excludes content fields, so we must compare
+        # them explicitly to distinguish a real update from a refresh.
+        content_changed = False
+        if isinstance(record, MDNSTXTRecord) and isinstance(existing, MDNSTXTRecord):
+            content_changed = record.entries != existing.entries
+        elif isinstance(record, MDNSSRVRecord) and isinstance(existing, MDNSSRVRecord):
+            content_changed = (record.priority, record.weight, record.port, record.target) != \
+                              (existing.priority, existing.weight, existing.port, existing.target)
+
+        self._record_cache.discard(existing)
+        self._record_cache.add(record)
+        return rrname if content_changed else None
 
     def _handle_mdns_packet(self) -> None:
         data, ancdata, flags, (src_ip, _src_port, _flowinfo, _scope_id) = self._mdns_listener.recvmsg(4096, 1024)
