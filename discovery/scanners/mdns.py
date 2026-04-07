@@ -3,11 +3,12 @@ import logging
 import socket
 import struct
 import sys
+import time
 from select import select
 from discovery.scanners.base_scanner import BaseScanner
-from typing import Optional
+from typing import Optional, Protocol
 
-from pydantic import BaseModel, computed_field
+from pydantic import BaseModel, ConfigDict
 from scapy.layers.dns import DNS, DNSQR, dnstypes
 
 MDNS_ADDR6 = "ff02::fb"
@@ -24,28 +25,87 @@ TYPE_SRV = 33
 
 class MDNSResponseRecord(BaseModel):
     """
-    Individual response records seen on the wire.
-    This is only planned on being used internally to cache values.
+    Base class for mDNS wire records. Used only as an internal cache.
+    Subclasses hold the parsed record data for each supported DNS record type.
     """
+    model_config = ConfigDict(eq=False)
 
-    interface: str
-    src_ip: str
-    rrname: str
-    rtype: int
-    rdata: str
-    ttl: int
-    received_at: float
+    interface: str     # Network interface this record was received on, e.g. 'eth0'
+    src_ip: str        # Source IPv6 address of the sender
+    rrname: str        # Fully-qualified domain name this record belongs to, e.g. 'mydevice.local.'
+    ttl: int           # Seconds this record may be cached as reported by the sender
+    received_at: float # time.time() timestamp when this record was last seen on the wire
 
-    @computed_field
-    @property
-    def type_name(self) -> str:
-        return dnstypes.get(self.rtype, str(self.rtype))
 
-    @computed_field
-    @property
-    def is_shared(self) -> bool:
-        """PTR records are shared (multiple devices can answer for one service type)."""
-        return self.rtype == TYPE_PTR
+class MDNSARecord(MDNSResponseRecord):
+    """A record — maps a hostname to an IPv4 address. Multiple per hostname are valid."""
+    address: str  # IPv4 address string, e.g. '192.168.1.1'
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, MDNSARecord):
+            return NotImplemented
+        return (self.interface, self.rrname, self.address) == (other.interface, other.rrname, other.address)
+
+    def __hash__(self) -> int:
+        return hash((self.interface, self.rrname, self.address))
+
+
+class MDNSAAAARecord(MDNSResponseRecord):
+    """AAAA record — maps a hostname to an IPv6 address. Multiple per hostname are valid."""
+    address: str  # IPv6 address string, e.g. 'fe80::1'
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, MDNSAAAARecord):
+            return NotImplemented
+        return (self.interface, self.rrname, self.address) == (other.interface, other.rrname, other.address)
+
+    def __hash__(self) -> int:
+        return hash((self.interface, self.rrname, self.address))
+
+
+class MDNSPTRRecord(MDNSResponseRecord):
+    """PTR record — maps a service type to a service instance name.
+    Shared: multiple devices can each contribute a PTR for the same service type."""
+    target: str  # Service instance name, e.g. 'My Printer._ipp._tcp.local.'
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, MDNSPTRRecord):
+            return NotImplemented
+        return (self.interface, self.rrname, self.target) == (other.interface, other.rrname, other.target)
+
+    def __hash__(self) -> int:
+        return hash((self.interface, self.rrname, self.target))
+
+
+class MDNSTXTRecord(MDNSResponseRecord):
+    """TXT record — key/value metadata for a service instance.
+    Unique: one owner per name, so a new response replaces the old one."""
+    entries: list[bytes]  # Raw TXT strings from scapy, e.g. [b'key=value', b'other=thing']
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, MDNSTXTRecord):
+            return NotImplemented
+        return (self.interface, self.rrname) == (other.interface, other.rrname)
+
+    def __hash__(self) -> int:
+        return hash((self.interface, self.rrname))
+
+
+class MDNSSRVRecord(MDNSResponseRecord):
+    """SRV record — maps a service instance name to a host, port, and priority.
+    Unique: one owner per service instance name."""
+    priority: int
+    weight: int
+    port: int
+    target: str  # Hostname of the machine providing the service, e.g. 'mydevice.local.'
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, MDNSSRVRecord):
+            return NotImplemented
+        return (self.interface, self.rrname) == (other.interface, other.rrname)
+
+    def __hash__(self) -> int:
+        return hash((self.interface, self.rrname))
 
 
 class MDNSServiceData(BaseModel):
@@ -85,6 +145,15 @@ class MDNSHostData(BaseModel):
 
     def __hash__(self) -> int:
         return hash((self.interface, self.hostname))
+
+
+class DNSRecord(Protocol):
+    """Structural type covering the fields shared by all scapy DNS RR classes."""
+    rrname: bytes  # Fully-qualified domain name this record belongs to, e.g. b'mydevice.local.'
+    type: int            # DNS record type (A=1, PTR=12, TXT=16, AAAA=28, SRV=33, ...)
+    ttl: int             # Seconds this record may be cached; 0 is a goodbye/withdrawal
+    rdata: object        # Record data — type varies by record type (str, bytes, list, or scapy object)
+
 
 
 class MdnsScanner(BaseScanner):
@@ -142,6 +211,9 @@ class MdnsScanner(BaseScanner):
 
         self._mdns_listener = self._create_mdns_listener(self._params.bind_address, self._params.port)
         self._active_interfaces: set[str] = set()
+        # Each MDNSResponseRecord is hashed/compared by (interface, rrname, rtype, rdata)
+        # so a discard+add upsert updates ttl/received_at without accumulating duplicates.
+        self._record_cache: set[MDNSResponseRecord] = set()
         self._keep_running = True
         try:
             while self._keep_running:
@@ -241,6 +313,37 @@ class MdnsScanner(BaseScanner):
                 case unknown:
                     logger.warning("Unknown command from server: %r", unknown)
 
+    def _process_rr(self, interface: str, src_ip: str, rr: DNSRecord, now: float) -> None:
+        """Upsert or remove one DNS resource record in the internal cache."""
+        rrname = rr.rrname.decode("utf-8", errors="replace")
+        common = dict(interface=interface, src_ip=src_ip, rrname=rrname, ttl=rr.ttl, received_at=now)
+
+        if rr.type == TYPE_A:
+            record: MDNSResponseRecord = MDNSARecord(**common, address=rr.rdata)
+        elif rr.type == TYPE_AAAA:
+            record = MDNSAAAARecord(**common, address=rr.rdata)
+        elif rr.type == TYPE_PTR:
+            target = rr.rdata.decode("utf-8", errors="replace") if isinstance(rr.rdata, bytes) else str(rr.rdata)
+            record = MDNSPTRRecord(**common, target=target)
+        elif rr.type == TYPE_TXT:
+            entries = rr.rdata if isinstance(rr.rdata, list) else [rr.rdata]
+            record = MDNSTXTRecord(**common, entries=entries)
+        elif rr.type == TYPE_SRV:
+            srv = rr.rdata
+            target = srv.target.decode("utf-8", errors="replace") if isinstance(srv.target, bytes) else str(srv.target)
+            record = MDNSSRVRecord(**common, priority=srv.priority, weight=srv.weight, port=srv.port, target=target)
+        else:
+            logger.debug("[%s] skipping unsupported record type %s", interface, dnstypes.get(rr.type, rr.type))
+            return
+
+        if rr.ttl == 0:
+            # Goodbye packet — the sender is withdrawing this record.
+            self._record_cache.discard(record)
+            logger.debug("[%s] removed record %r %s", interface, rrname, dnstypes.get(rr.type, rr.type))
+        else:
+            self._record_cache.discard(record)
+            self._record_cache.add(record)
+
     def _handle_mdns_packet(self) -> None:
         data, ancdata, flags, (src_ip, _src_port, _flowinfo, _scope_id) = self._mdns_listener.recvmsg(4096, 1024)
 
@@ -255,34 +358,29 @@ class MdnsScanner(BaseScanner):
             return
 
         pkt = DNS(data)
+
+        # Skip queries — only responses carry authoritative record data.
+        if not pkt.qr:
+            return
+
         logger.debug(
-            "[%s] mDNS from %s  qd=%d an=%d ns=%d ar=%d",
-            interface, src_ip, pkt.qdcount, pkt.ancount, pkt.nscount, pkt.arcount,
+            "[%s] mDNS response from %s  an=%d ns=%d ar=%d",
+            interface, src_ip, pkt.ancount, pkt.nscount, pkt.arcount,
         )
-        for i in range(pkt.qdcount):
-            qr = pkt.qd[i]
-            logger.debug(
-                "[%s]   QD: %r  type=%s  class=%d",
-                interface, qr.qname, dnstypes.get(qr.qtype, qr.qtype), qr.qclass,
-            )
-        for i in range(pkt.ancount):
-            rr = pkt.an[i]
-            logger.debug(
-                "[%s]   AN: %r  type=%s  ttl=%d  rdata=%r",
-                interface, rr.rrname, dnstypes.get(rr.type, rr.type), rr.ttl, rr.rdata,
-            )
-        for i in range(pkt.nscount):
-            rr = pkt.ns[i]
-            logger.debug(
-                "[%s]   NS: %r  type=%s  ttl=%d  rdata=%r",
-                interface, rr.rrname, dnstypes.get(rr.type, rr.type), rr.ttl, rr.rdata,
-            )
-        for i in range(pkt.arcount):
-            rr = pkt.ar[i]
-            logger.debug(
-                "[%s]   AR: %r  type=%s  ttl=%d  rdata=%r",
-                interface, rr.rrname, dnstypes.get(rr.type, rr.type), rr.ttl, rr.rdata,
-            )
+
+        now = time.time()
+        for count, section in (
+            (pkt.ancount, pkt.an),
+            (pkt.nscount, pkt.ns),
+            (pkt.arcount, pkt.ar),
+        ):
+            for i in range(count):
+                rr = section[i]
+                logger.debug(
+                    "[%s]   %r  type=%s  ttl=%d  rdata=%r",
+                    interface, rr.rrname, dnstypes.get(rr.type, rr.type), rr.ttl, rr.rdata,
+                )
+                self._process_rr(interface, src_ip, rr, now)
 
 
 if __name__ == "__main__":
