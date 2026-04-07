@@ -1,5 +1,4 @@
 import argparse
-import json
 import logging
 import socket
 import struct
@@ -138,7 +137,7 @@ class MdnsScanner(BaseScanner):
             },
             "interfaces": interfaces,
         }
-        self.server.send_msg(json.dumps(announce))
+        self.server.send_msg(announce)
         self.wait_for_registration()
 
         self._mdns_listener = self._create_mdns_listener(self._params.bind_address, self._params.port)
@@ -184,13 +183,7 @@ class MdnsScanner(BaseScanner):
             self._keep_running = False
             return
 
-        for raw in msgs:
-            try:
-                msg = json.loads(raw)
-            except json.JSONDecodeError:
-                logger.warning("Non-JSON message from server: %r", raw)
-                continue
-
+        for msg in msgs:
             match msg.get("command"):
                 case "set_scanner_parameters":
                     changed = []

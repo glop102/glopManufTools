@@ -1,5 +1,4 @@
 import argparse
-import json
 import os
 import signal
 from select import select
@@ -161,7 +160,7 @@ class DiscoveryServer:
                     logger.debug(f"New connection from {_addr}")
                 elif s in self.unannounced_connections:
                     try:
-                        msgs: list[str] = s.read_msgs()
+                        msgs: list[dict] = s.read_msgs()
                         logger.debug(
                             f"New Connection has delivered {len(msgs)} messages"
                         )
@@ -171,7 +170,7 @@ class DiscoveryServer:
                         self.unannounced_connections.remove(s)
                 elif s in self.clients:
                     try:
-                        msgs: list[str] = s.read_msgs()
+                        msgs: list[dict] = s.read_msgs()
                         logger.debug(f"Client has delivered {len(msgs)} messages")
                         self._handle_client_msgs(s, msgs)
                     except ConnectionError:
@@ -183,7 +182,7 @@ class DiscoveryServer:
                 elif s in self.scanners:
                     assert isinstance(s, ScannerConnection)
                     try:
-                        msgs: list[str] = s.read_msgs()
+                        msgs: list[dict] = s.read_msgs()
                         logger.debug(f"    {msgs}")
                         self._handle_scanner_msgs(s, msgs)
                     except ConnectionError:
@@ -211,13 +210,8 @@ class DiscoveryServer:
         for client in self.clients:
             client.send_msg(msg, send_synchronous=False)
 
-    def _handle_unannounced_msgs(self, conn: MsgSocket, messages: list[str]):
-        for raw in messages:
-            try:
-                msg = json.loads(raw)
-            except json.JSONDecodeError:
-                logger.warning(f"Received non-JSON message: {raw!r}")
-                continue
+    def _handle_unannounced_msgs(self, conn: MsgSocket, messages: list[dict]):
+        for msg in messages:
             match msg.get("command"):
                 case "announce":
                     match msg.get("type"):
@@ -280,14 +274,8 @@ class DiscoveryServer:
                         f"Unknown command from unannounced connection: {unknown!r}"
                     )
 
-    def _handle_client_msgs(self, conn: MsgSocket, messages: list[str]):
-        for raw in messages:
-            try:
-                msg = json.loads(raw)
-            except json.JSONDecodeError:
-                logger.warning(f"Received non-JSON message from client: {raw!r}")
-                continue
-
+    def _handle_client_msgs(self, conn: MsgSocket, messages: list[dict]):
+        for msg in messages:
             command = msg.get("command")
             logger.debug(f"Client command: {command!r}")
 
@@ -595,16 +583,8 @@ class DiscoveryServer:
                 case unknown:
                     logger.warning(f"Unknown command from client: {unknown!r}")
 
-    def _handle_scanner_msgs(self, scanner: ScannerConnection, messages: list[str]):
-        for raw in messages:
-            try:
-                msg = json.loads(raw)
-            except json.JSONDecodeError:
-                logger.warning(
-                    f"Received non-JSON message from scanner {scanner.name!r}: {raw!r}"
-                )
-                continue
-
+    def _handle_scanner_msgs(self, scanner: ScannerConnection, messages: list[dict]):
+        for msg in messages:
             command = msg.get("command")
             logger.debug(f"Scanner {scanner.name!r} command: {command!r}")
 

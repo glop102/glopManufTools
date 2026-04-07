@@ -25,15 +25,15 @@ class MsgSocket:
         """Allow select() to use this object directly."""
         return self._sock.fileno()
 
-    def read_msgs(self) -> list[str]:
+    def read_msgs(self) -> list[dict]:
         """
-        Reads all the queued bytes into our buffer and then parses out messages.
-        This accounts for clients trying to send multiple messages at once and
-        also clients sending messages in chunks.
+        Reads all the queued bytes into our buffer, parses out framed messages,
+        and JSON-decodes each one. Messages that fail to decode are logged and
+        skipped. This accounts for clients trying to send multiple messages at
+        once and also clients sending messages in chunks.
         """
         # While the socket is readable, drain its buffer
         while len(select([self._sock], [], [], 0.0)[0]):
-            # Try to read from the buffer from the socket
             chunk = self._sock.recv(4096)
             if not chunk:
                 raise ConnectionError(
@@ -41,18 +41,15 @@ class MsgSocket:
                 )
             self._read_buf += chunk
 
-        # Now that we have fully drained the socket's buffer, lets try to parse out any messages that have been sent
-        # We parse the header to know the size, then if there are enough bytes in the buffer, we mutate the buffer
-        # and add it to the list of messages
-        messages_found: list[str] = []
+        messages_found: list[dict] = []
         while len(self._read_buf) >= 4:
             (msg_len,) = struct.unpack(">I", self._read_buf[:4])
             if len(self._read_buf) >= msg_len + 4:
-                msg = self._read_buf[4 : 4 + msg_len]
+                raw = self._read_buf[4 : 4 + msg_len]
                 self._read_buf = self._read_buf[4 + msg_len :]
                 try:
-                    messages_found.append(msg.decode("utf-8"))
-                except UnicodeDecodeError as e:
+                    messages_found.append(json.loads(raw.decode("utf-8")))
+                except (UnicodeDecodeError, json.JSONDecodeError) as e:
                     logger.error(
                         f"Unable to decode buffered message: len({msg_len})", exc_info=e
                     )

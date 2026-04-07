@@ -12,7 +12,6 @@ Usage:
 """
 
 import argparse
-import json
 import sys
 import time
 from collections import deque
@@ -28,7 +27,7 @@ _overflow: deque[dict] = deque()
 
 
 def _send(sock, msg: dict) -> None:
-    sock.send_msg(json.dumps(msg))
+    sock.send_msg(msg)
 
 
 def _recv_one(sock, timeout: float = 5.0) -> dict:
@@ -40,8 +39,8 @@ def _recv_one(sock, timeout: float = 5.0) -> dict:
     msgs = sock.read_msgs()
     if not msgs:
         raise RuntimeError("Connection closed before a message was received")
-    _overflow.extend(json.loads(m) for m in msgs[1:])
-    return json.loads(msgs[0])
+    _overflow.extend(msgs[1:])
+    return msgs[0]
 
 
 def _send_and_expect(
@@ -63,8 +62,7 @@ def _drain(sock, timeout: float = 0.3) -> list[dict]:
         ready, _, _ = select([sock], [], [], timeout)
         if not ready:
             break
-        for raw in sock.read_msgs():
-            collected.append(json.loads(raw))
+        collected.extend(sock.read_msgs())
     return collected
 
 

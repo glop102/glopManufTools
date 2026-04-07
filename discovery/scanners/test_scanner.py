@@ -9,7 +9,6 @@ server fan-out messages.
 """
 
 import argparse
-import json
 import logging
 import signal
 import sys
@@ -30,7 +29,7 @@ class TestResult(BaseModel):
 
 
 def _send(sock, msg: dict) -> None:
-    sock.send_msg(json.dumps(msg))
+    sock.send_msg(msg)
 
 
 def _recv_one(sock, timeout: float = 5.0) -> dict:
@@ -40,7 +39,7 @@ def _recv_one(sock, timeout: float = 5.0) -> dict:
     msgs = sock.read_msgs()
     if not msgs:
         raise RuntimeError("Connection closed before a message was received")
-    return json.loads(msgs[0])
+    return msgs[0]
 
 
 logger = logging.getLogger("TestScanner")
@@ -200,12 +199,7 @@ class TestScanner(BaseScanner):
             except ConnectionError:
                 logger.info("Server connection closed, shutting down")
                 break
-            for raw in msgs:
-                try:
-                    msg = json.loads(raw)
-                except json.JSONDecodeError:
-                    logger.warning(f"Non-JSON message from server: {raw!r}")
-                    continue
+            for msg in msgs:
 
                 command = msg.get("command")
 

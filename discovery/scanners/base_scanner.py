@@ -1,5 +1,4 @@
 import argparse
-import json
 import logging
 import os
 import stat
@@ -66,7 +65,7 @@ class BaseScanner(ABC):
                 "Timed out waiting for registered confirmation from server"
             )
         msgs = self.server.read_msgs()
-        registered = json.loads(msgs[0]) if msgs else {}
+        registered = msgs[0] if msgs else {}
         if (
             registered.get("command") != "status"
             or registered.get("status") != "accepted"
