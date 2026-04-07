@@ -117,7 +117,7 @@ class MdnsScanner(BaseScanner):
         )
         parser.add_argument(
             "--bind-address",
-            default="",
+            default="::",
             help="IPv6 address to bind to (default: :: — all interfaces)",
         )
         self._params = parser.parse_args(args)

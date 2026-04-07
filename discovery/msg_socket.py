@@ -17,6 +17,7 @@ class MsgSocket:
 
     def __init__(self, sock: socket.socket):
         self._sock = sock
+        self._sock.setblocking(False)
         self._read_buf = b""
         self._write_buf = b""
 
@@ -67,8 +68,8 @@ class MsgSocket:
         """
         Send a message framed with a 4-byte big-endian length header.
         msg may be a str or a dict; dicts are serialised to JSON automatically.
-        When send_synchronous is True (default), flushes the entire write buffer
-        via sendall() so the call blocks until all queued bytes are sent.
+        When send_synchronous is True (default), blocks until all queued bytes
+        have been sent.
         When False, queues the bytes and flushes as much as possible without
         blocking, leaving any remainder for the next flush_write_buf() call.
         """
@@ -77,10 +78,27 @@ class MsgSocket:
         data = msg.encode("utf-8")
         self._write_buf += struct.pack(">I", len(data)) + data
         if send_synchronous:
-            self._sock.sendall(self._write_buf)
-            self._write_buf = b""
+            self._flush_sync()
         else:
             self.flush_write_buf()
+
+    def _flush_sync(self) -> None:
+        """
+        Block until every queued byte has been sent.
+        Uses select() to wait for writability so the socket can stay non-blocking
+        and the non-blocking async path in flush_write_buf() keeps working correctly.
+        """
+        while self._write_buf:
+            _, writable, _ = select([], [self._sock], [], None)
+            if not writable:
+                continue
+            try:
+                sent = self._sock.send(self._write_buf)
+                self._write_buf = self._write_buf[sent:]
+            except BlockingIOError:
+                pass
+            except OSError as e:
+                raise ConnectionError("Socket write failed") from e
 
     def close(self) -> None:
         self._sock.close()

@@ -37,14 +37,6 @@ class ScannerConnection(MsgSocket):
         self.active_interfaces = []
         self.results = {}
 
-    def to_dict(self) -> dict:
-        return {
-            "name": self.name,
-            "available_interfaces": self.interfaces,
-            "active_interfaces": self.active_interfaces,
-            "parameters": self.parameters,
-        }
-
     @classmethod
     def promote(cls, conn: MsgSocket) -> Self:
         conn.__class__ = cls
@@ -55,8 +47,13 @@ class DiscoveryServer:
     # Maps scanner name -> module path for scanners the server knows how to launch.
     _builtin_scanners = {
         "test": "discovery.scanners.test_scanner",
-        "mdns": "discovery.scanners.mdns",
+        "mdns.v1": "discovery.scanners.mdns",
     }
+
+    def __init__(self):
+        self.unannounced_connections: list[MsgSocket] = []
+        self.clients: list[MsgSocket] = []
+        self.scanners: list[ScannerConnection] = []
 
     def open_server_socket(
         self,
@@ -310,7 +307,15 @@ class DiscoveryServer:
                         {
                             "command": "status",
                             "status": "accepted",
-                            "scanners": [sc.to_dict() for sc in self.scanners],
+                            "scanners": [
+                                {
+                                    "name": sc.name,
+                                    "available_interfaces": sc.interfaces,
+                                    "active_interfaces": sc.active_interfaces,
+                                    "parameters": sc.parameters,
+                                }
+                                for sc in self.scanners
+                            ],
                         },
                         send_synchronous=False,
                     )
@@ -328,7 +333,14 @@ class DiscoveryServer:
                         )
                     else:
                         conn.send_msg(
-                            {"command": "status", "status": "accepted", **sc.to_dict()},
+                            {
+                                "command": "status",
+                                "status": "accepted",
+                                "name": sc.name,
+                                "available_interfaces": sc.interfaces,
+                                "active_interfaces": sc.active_interfaces,
+                                "parameters": sc.parameters,
+                            },
                             send_synchronous=False,
                         )
 
@@ -640,25 +652,28 @@ class DiscoveryServer:
                     })
 
                 case "scan_results_update":
+                    valid_results = []
                     for item in msg.get("results", []):
                         key = item.get("key")
                         result = item.get("result")
                         if key is not None and result is not None:
                             scanner.results[key] = result
+                            valid_results.append(item)
                     scanner.send_msg(
                         {"command": "status", "status": "accepted"},
                         send_synchronous=False,
                     )
-                    self._broadcast_to_clients({
-                        "command": "scan_results_update",
-                        "scanner": scanner.name,
-                        "results": msg.get("results", []),
-                    })
+                    if valid_results:
+                        self._broadcast_to_clients({
+                            "command": "scan_results_update",
+                            "scanner": scanner.name,
+                            "results": valid_results,
+                        })
 
                 case "scan_results_remove":
-                    keys = msg.get("keys", [])
-                    for key in keys:
-                        scanner.results.pop(key, None)
+                    removed_keys = [k for k in msg.get("keys", []) if k in scanner.results]
+                    for key in removed_keys:
+                        del scanner.results[key]
                     scanner.send_msg(
                         {"command": "status", "status": "accepted"},
                         send_synchronous=False,
@@ -666,7 +681,7 @@ class DiscoveryServer:
                     self._broadcast_to_clients({
                         "command": "scan_results_remove",
                         "scanner": scanner.name,
-                        "keys": keys,
+                        "keys": removed_keys,
                     })
 
                 case unknown:
