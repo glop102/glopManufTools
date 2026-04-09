@@ -294,7 +294,7 @@ class MdnsScanner(BaseScanner):
                     if changed:
                         if "port" in changed or "bind_address" in changed:
                             self._mdns_listener.close()
-                            # TODO - add the cache_clear handler method here since a new socket invalidates all discoveries
+                            self._clear_cache()
                             self._mdns_listener = self._create_mdns_listener(
                                 self._params.bind_address, self._params.port
                             )
@@ -324,8 +324,8 @@ class MdnsScanner(BaseScanner):
                     })
 
                 case "clear_cache":
-                    # TODO: clear internal result state, then repopulate via scan_results_update
                     logger.debug("clear_cache received")
+                    self._clear_cache()
 
                 case "stop_scanner":
                     logger.info("stop_scanner received, shutting down")
@@ -333,6 +333,24 @@ class MdnsScanner(BaseScanner):
 
                 case unknown:
                     logger.warning("Unknown command from server: %r", unknown)
+
+    def _clear_cache(self) -> None:
+        """
+        Clear all internal record state and notify the broker to remove any previously
+        reported hosts. Safe to call when the broker has already cleared its own cache —
+        it filters unknown keys so the remove becomes a no-op.
+        """
+        assert self.server is not None
+        known_keys = (
+            {f"{r.interface}/{r.rrname}" for r in self._record_cache if isinstance(r, (MDNSARecord, MDNSAAAARecord))}
+            | {f"{r.interface}/{r.target}" for r in self._record_cache if isinstance(r, MDNSSRVRecord)}
+        )
+        self._record_cache.clear()
+        if known_keys:
+            self.server.send_msg({
+                "command": "scan_results_remove",
+                "keys": list(known_keys),
+            })
 
     def _process_rr(self, interface: str, rr: DNSRecord, now: float) -> ChangedRRName | None:
         """
