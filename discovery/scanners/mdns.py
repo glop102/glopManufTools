@@ -6,6 +6,7 @@ import sys
 import time
 from select import select
 from discovery.scanners.base_scanner import BaseScanner
+from abc import abstractmethod
 from typing import Optional, Protocol
 
 from pydantic import BaseModel, ConfigDict
@@ -34,6 +35,9 @@ class MDNSResponseRecord(BaseModel):
     rrname: str        # Fully-qualified domain name this record belongs to, e.g. 'mydevice.local.'
     ttl: int           # Seconds this record may be cached as reported by the sender
     received_at: float # time.time() timestamp when this record was last seen on the wire
+
+    @abstractmethod
+    def __hash__(self) -> int: ...
 
 
 class MDNSARecord(MDNSResponseRecord):
@@ -370,6 +374,15 @@ class MdnsScanner(BaseScanner):
         self._record_cache.add(record)
         return rrname if content_changed else None
 
+    def _expire_records(self, now: float) -> set[str]:
+        """
+        Remove all cached records whose TTL has elapsed and return the set of
+        rrnames that were affected.
+        """
+        expired = {r for r in self._record_cache if r.received_at + r.ttl < now}
+        self._record_cache -= expired
+        return {r.rrname for r in expired}
+
     def _handle_mdns_packet(self) -> None:
         data, ancdata, _flags, (src_ip, _src_port, _flowinfo, _scope_id) = self._mdns_listener.recvmsg(4096, 1024)
 
@@ -401,12 +414,16 @@ class MdnsScanner(BaseScanner):
         all_rrs = [section[i]
                    for count, section in ((pkt.ancount, pkt.an), (pkt.nscount, pkt.ns), (pkt.arcount, pkt.ar))
                    for i in range(count)]
+
+        changed_rrnames: set[str] = set()
         for rr in all_rrs:
             logger.debug(
                 "[%s]   %r  type=%s  ttl=%d  rdata=%r",
                 interface, rr.rrname, dnstypes.get(rr.type, rr.type), rr.ttl, rr.rdata,
             )
-            self._process_rr(interface, rr, now)
+            if rrname := self._process_rr(interface, rr, now):
+                changed_rrnames.add(rrname)
+        changed_rrnames |= self._expire_records(now)
 
 
 if __name__ == "__main__":
