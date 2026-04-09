@@ -215,7 +215,7 @@ class MdnsScanner(BaseScanner):
             raise RuntimeError(
                 "Scanner returned from connect_to_server() without a valid self.server instance"
             )
-        interfaces = [name for _, name in socket.if_nameindex()]
+        self._available_interfaces: set[str] = {name for _, name in socket.if_nameindex()}
         announce = {
             "command": "announce",
             "type": "scanner",
@@ -224,7 +224,7 @@ class MdnsScanner(BaseScanner):
                 "port": self._params.port,
                 "bind_address": self._params.bind_address,
             },
-            "interfaces": interfaces,
+            "interfaces": list(self._available_interfaces),
         }
         self.server.send_msg(announce)
         self.wait_for_registration()
@@ -244,6 +244,8 @@ class MdnsScanner(BaseScanner):
 
                 if self._mdns_listener in ready:
                     self._handle_mdns_packet()
+
+                self._check_interfaces()
         finally:
             self._mdns_listener.close()
 
@@ -278,6 +280,39 @@ class MdnsScanner(BaseScanner):
                 "command": "scan_results_remove",
                 "keys": list(known_keys),
             })
+
+    def _check_interfaces(self) -> None:
+        """
+        Detect interface changes and notify the broker. Called every main loop iteration.
+        - Appeared interfaces: report updated available list to broker.
+        - Disappeared interfaces: leave any we were active on (which cleans up records and
+          notifies the broker of removed hosts), then report updated available and active lists.
+        """
+        assert self.server is not None
+        current = {name for _, name in socket.if_nameindex()}
+        appeared = current - self._available_interfaces
+        disappeared = self._available_interfaces - current
+
+        if not appeared and not disappeared:
+            return
+
+        active_changed = False
+        for iface in disappeared:
+            if iface in self._active_interfaces:
+                self._leave_interface(iface)
+                active_changed = True
+
+        self._available_interfaces = current
+
+        if active_changed:
+            self.server.send_msg({
+                "command": "active_interfaces_changed",
+                "interfaces": list(self._active_interfaces),
+            })
+        self.server.send_msg({
+            "command": "available_interfaces_changed",
+            "interfaces": list(self._available_interfaces),
+        })
 
     def _handle_server_msgs(self) -> None:
         assert(self.server is not None)
