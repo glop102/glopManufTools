@@ -372,7 +372,7 @@ class MdnsScanner(BaseScanner):
                         changed.append(name)
                         logger.debug("Parameter %r changed to %r", name, value)
                     if changed:
-                        if "port" in changed or "bind_address" in changed:
+                        if "port" in changed or "bind_address" in changed or "multicast_group" in changed:
                             self._mdns_listener.close()
                             self._clear_cache()
                             self._mdns_listener = self._create_mdns_listener(
@@ -425,6 +425,7 @@ class MdnsScanner(BaseScanner):
             | {f"{r.interface}/{r.target}" for r in self._record_cache if isinstance(r, MDNSSRVRecord)}
         )
         self._record_cache.clear()
+        logger.info("Cache cleared, removing %d previously reported hosts", len(known_keys))
         if known_keys:
             self.server.send_msg({
                 "command": "scan_results_remove",
