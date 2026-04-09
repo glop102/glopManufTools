@@ -258,6 +258,7 @@ class MdnsScanner(BaseScanner):
         logger.debug("Joined mDNS multicast group on %s", interface)
 
     def _leave_interface(self, interface: str) -> None:
+        assert self.server is not None
         mreq = struct.pack(
             "16sI",
             socket.inet_pton(socket.AF_INET6, MDNS_ADDR6),
@@ -266,6 +267,17 @@ class MdnsScanner(BaseScanner):
         self._mdns_listener.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_LEAVE_GROUP, mreq)
         self._active_interfaces.discard(interface)
         logger.debug("Left mDNS multicast group on %s", interface)
+
+        known_keys = (
+            {f"{r.interface}/{r.rrname}" for r in self._record_cache if isinstance(r, (MDNSARecord, MDNSAAAARecord)) and r.interface == interface}
+            | {f"{r.interface}/{r.target}" for r in self._record_cache if isinstance(r, MDNSSRVRecord) and r.interface == interface}
+        )
+        self._record_cache = {r for r in self._record_cache if r.interface != interface}
+        if known_keys:
+            self.server.send_msg({
+                "command": "scan_results_remove",
+                "keys": list(known_keys),
+            })
 
     def _handle_server_msgs(self) -> None:
         assert(self.server is not None)
@@ -317,7 +329,6 @@ class MdnsScanner(BaseScanner):
                             logger.warning("Failed to join mDNS group on %s, interface may have disappeared", iface, exc_info=True)
                     for iface in self._active_interfaces - requested:
                         self._leave_interface(iface)
-                        # TODO - send messages about discovered devices on the interface we are leaving as disappearing devices
                     self.server.send_msg({
                         "command": "active_interfaces_changed",
                         "interfaces": list(self._active_interfaces),
