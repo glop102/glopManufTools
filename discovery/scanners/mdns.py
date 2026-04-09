@@ -208,6 +208,22 @@ class MdnsScanner(BaseScanner):
             default="::",
             help="IPv6 address to bind to (default: :: — all interfaces)",
         )
+        parser.add_argument(
+            "--query-domain",
+            default="_services._dns-sd._udp.local.",
+            help="mDNS PTR query domain to send periodically (default: _services._dns-sd._udp.local.)",
+        )
+        parser.add_argument(
+            "--active-query-delay",
+            type=float,
+            default=4.0,
+            help="Seconds between active mDNS queries (default: 4.0)",
+        )
+        parser.add_argument(
+            "--multicast-group",
+            default=MDNS_ADDR6,
+            help=f"IPv6 multicast group to join and query (default: {MDNS_ADDR6})",
+        )
         self._params = parser.parse_args(args)
 
         self.connect_to_server()
@@ -220,10 +236,7 @@ class MdnsScanner(BaseScanner):
             "command": "announce",
             "type": "scanner",
             "name": "mdns.v1",
-            "parameters": {
-                "port": self._params.port,
-                "bind_address": self._params.bind_address,
-            },
+            "parameters": vars(self._params),
             "interfaces": list(self._available_interfaces),
         }
         self.server.send_msg(announce)
@@ -234,6 +247,7 @@ class MdnsScanner(BaseScanner):
         # Each MDNSResponseRecord is hashed/compared by (interface, rrname, rtype, rdata)
         # so a discard+add upsert updates ttl/received_at without accumulating duplicates.
         self._record_cache: set[MDNSResponseRecord] = set()
+        self._last_query_time: float = 0.0
         self._keep_running = True
         try:
             while self._keep_running:
@@ -246,13 +260,18 @@ class MdnsScanner(BaseScanner):
                     self._handle_mdns_packet()
 
                 self._check_interfaces()
+
+                now = time.time()
+                if now - self._last_query_time >= self._params.active_query_delay:
+                    self._send_query()
+                    self._last_query_time = now
         finally:
             self._mdns_listener.close()
 
     def _join_interface(self, interface: str) -> None:
         mreq = struct.pack(
             "16sI",
-            socket.inet_pton(socket.AF_INET6, MDNS_ADDR6),
+            socket.inet_pton(socket.AF_INET6, self._params.multicast_group),
             socket.if_nametoindex(interface),
         )
         self._mdns_listener.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_JOIN_GROUP, mreq)
@@ -263,7 +282,7 @@ class MdnsScanner(BaseScanner):
         assert self.server is not None
         mreq = struct.pack(
             "16sI",
-            socket.inet_pton(socket.AF_INET6, MDNS_ADDR6),
+            socket.inet_pton(socket.AF_INET6, self._params.multicast_group),
             socket.if_nametoindex(interface),
         )
         self._mdns_listener.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_LEAVE_GROUP, mreq)
@@ -313,6 +332,20 @@ class MdnsScanner(BaseScanner):
             "command": "available_interfaces_changed",
             "interfaces": list(self._available_interfaces),
         })
+
+    def _send_query(self) -> None:
+        """Send a PTR query for query_domain out on every active interface."""
+        if not self._active_interfaces:
+            return
+        pkt = bytes(DNS(rd=0, qd=DNSQR(qname=self._params.query_domain, qtype="PTR")))
+        for iface in self._active_interfaces:
+            self._mdns_listener.setsockopt(
+                socket.IPPROTO_IPV6,
+                socket.IPV6_MULTICAST_IF,
+                struct.pack("I", socket.if_nametoindex(iface)),
+            )
+            self._mdns_listener.sendto(pkt, (self._params.multicast_group, self._params.port))
+            logger.debug("[%s] sent mDNS query for %s", iface, self._params.query_domain)
 
     def _handle_server_msgs(self) -> None:
         assert(self.server is not None)
