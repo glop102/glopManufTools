@@ -455,8 +455,7 @@ class MdnsScanner(BaseScanner):
             record = MDNSTXTRecord(**common, entries=entries)
             changed_type = RRNameType.INSTANCE_NAME
         elif rr.type == TYPE_SRV:
-            srv = rr.rdata
-            record = MDNSSRVRecord(**common, priority=srv.priority, weight=srv.weight, port=srv.port, target=srv.target.decode("utf-8", errors="replace"))
+            record = MDNSSRVRecord(**common, priority=rr.priority, weight=rr.weight, port=rr.port, target=rr.target.decode("utf-8", errors="replace"))
             changed_type = RRNameType.INSTANCE_NAME
         else:
             logger.debug("[%s] skipping unsupported record type %s", interface, dnstypes.get(rr.type, rr.type))
@@ -613,7 +612,7 @@ class MdnsScanner(BaseScanner):
         for rr in all_rrs:
             logger.debug(
                 "[%s]   %r  type=%s  ttl=%d  rdata=%r",
-                interface, rr.rrname, dnstypes.get(rr.type, rr.type), rr.ttl, rr.rdata,
+                interface, rr.rrname, dnstypes.get(rr.type, rr.type), rr.ttl, getattr(rr, "rdata", None),
             )
             if changed := self._process_rr(interface, rr, now):
                 changed_rrnames.add(changed)
