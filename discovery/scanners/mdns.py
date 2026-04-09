@@ -371,7 +371,7 @@ class MdnsScanner(BaseScanner):
         return rrname if content_changed else None
 
     def _handle_mdns_packet(self) -> None:
-        data, ancdata, flags, (src_ip, _src_port, _flowinfo, _scope_id) = self._mdns_listener.recvmsg(4096, 1024)
+        data, ancdata, _flags, (src_ip, _src_port, _flowinfo, _scope_id) = self._mdns_listener.recvmsg(4096, 1024)
 
         interface = None
         for cmsg_level, cmsg_type, cmsg_data in ancdata:
@@ -394,19 +394,19 @@ class MdnsScanner(BaseScanner):
             interface, src_ip, pkt.ancount, pkt.nscount, pkt.arcount,
         )
 
+        # pkt.an / ancount — Answer section
+        # pkt.ns / nscount — Authority (Nameserver) section
+        # pkt.ar / arcount — Additional Records section
         now = time.time()
-        for count, section in (
-            (pkt.ancount, pkt.an),
-            (pkt.nscount, pkt.ns),
-            (pkt.arcount, pkt.ar),
-        ):
-            for i in range(count):
-                rr = section[i]
-                logger.debug(
-                    "[%s]   %r  type=%s  ttl=%d  rdata=%r",
-                    interface, rr.rrname, dnstypes.get(rr.type, rr.type), rr.ttl, rr.rdata,
-                )
-                self._process_rr(interface, rr, now)
+        all_rrs = [section[i]
+                   for count, section in ((pkt.ancount, pkt.an), (pkt.nscount, pkt.ns), (pkt.arcount, pkt.ar))
+                   for i in range(count)]
+        for rr in all_rrs:
+            logger.debug(
+                "[%s]   %r  type=%s  ttl=%d  rdata=%r",
+                interface, rr.rrname, dnstypes.get(rr.type, rr.type), rr.ttl, rr.rdata,
+            )
+            self._process_rr(interface, rr, now)
 
 
 if __name__ == "__main__":
