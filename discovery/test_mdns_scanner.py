@@ -145,21 +145,21 @@ def scanner_unit():
     return s
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def free_tcp_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def free_udp_port():
     with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as s:
         s.bind(("::1", 0))
         return s.getsockname()[1]
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def server_conn(free_tcp_port):
     _overflow.clear()
     conn = DiscoveryClient.connect(
@@ -172,7 +172,7 @@ def server_conn(free_tcp_port):
     conn.close()
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def mdns_scanner_thread(server_conn, free_tcp_port, free_udp_port):
     scanner = MdnsScanner()
     remaining = scanner.parse_connection_args([f"--tcp-socket=127.0.0.1:{free_tcp_port}"])
