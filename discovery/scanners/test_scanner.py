@@ -22,7 +22,7 @@ from discovery.scanners.base_scanner import BaseScanner
 from discovery.scanners.mdns import MDNSHostData, MDNSServiceData
 
 
-class TestResult(BaseModel):
+class ScannerResult(BaseModel):
     name: str
     value: str
     tags: list[str] = []
@@ -146,10 +146,10 @@ class TestScanner(BaseScanner):
         active = [i for i in parsed.active_interfaces.split(",") if i]
         cache_clear_count = 0
 
-        fake_results: dict[str, TestResult] = {
-            str(uuid.uuid4()): TestResult(name="device-alpha", value="192.168.1.100", tags=["printer"]),
-            str(uuid.uuid4()): TestResult(name="device-beta", value="192.168.1.101", tags=["nas", "storage"]),
-            str(uuid.uuid4()): TestResult(name="device-gamma", value="192.168.1.102", tags=[]),
+        fake_results: dict[str, ScannerResult] = {
+            str(uuid.uuid4()): ScannerResult(name="device-alpha", value="192.168.1.100", tags=["printer"]),
+            str(uuid.uuid4()): ScannerResult(name="device-beta", value="192.168.1.101", tags=["nas", "storage"]),
+            str(uuid.uuid4()): ScannerResult(name="device-gamma", value="192.168.1.102", tags=[]),
         }
 
         initial_parameters = {
