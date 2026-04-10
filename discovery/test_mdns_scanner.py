@@ -530,6 +530,11 @@ class TestMdnsIntegration:
         _, udp_port = mdns_scanner_thread
         _drain(server_conn, timeout=0.3)
 
+        # Seed the cache independently — don't rely on a prior test having done it.
+        _send_mdns_packet(udp_port, _build_response_packet())
+        _wait_for(server_conn, "scan_results_update", deadline_secs=5.0, scanner="mdns.v1")
+        _drain(server_conn, timeout=0.3)
+
         _send_mdns_packet(udp_port, _build_goodbye_packet())
 
         msgs = _wait_for(server_conn, "scan_results_remove", deadline_secs=5.0, scanner="mdns.v1")

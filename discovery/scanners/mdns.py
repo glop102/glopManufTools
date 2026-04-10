@@ -6,9 +6,9 @@ import sys
 import time
 from select import select
 from discovery.scanners.base_scanner import BaseScanner
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 from enum import Enum
-from typing import NamedTuple, Optional, Protocol
+from typing import NamedTuple, Optional, Protocol, TypedDict
 
 from pydantic import BaseModel, ConfigDict
 from scapy.layers.dns import DNS, DNSQR, dnstypes
@@ -37,7 +37,7 @@ class ChangedRRName(NamedTuple):
     interface: str
 
 
-class MDNSResponseRecord(BaseModel):
+class MDNSResponseRecord(BaseModel, ABC):
     """
     Base class for mDNS wire records. Used only as an internal cache.
     Subclasses hold the parsed record data for each supported DNS record type.
@@ -173,6 +173,12 @@ class DNSRecord(Protocol):
     type: int            # DNS record type (A=1, PTR=12, TXT=16, AAAA=28, SRV=33, ...)
     ttl: int             # Seconds this record may be cached; 0 is a goodbye/withdrawal
     rdata: object        # Record data — type varies by record type (str, bytes, list, or scapy object)
+    # SRV-specific fields (DNSRRSRV exposes these as direct attributes, not via rdata)
+    priority: int
+    weight: int
+    port: int
+    target: bytes
+
 
 
 
@@ -432,25 +438,35 @@ class MdnsScanner(BaseScanner):
                 "keys": list(known_keys),
             })
 
+
     def _process_rr(self, interface: str, rr: DNSRecord, now: float) -> ChangedRRName | None:
         """
         Upsert or remove one DNS resource record in the internal cache.
         Returns a ChangedRRName if the cache changed meaningfully (record added, removed,
         or content updated), or None for a TTL-only refresh with no data change.
         """
+        class _CommonRRFields(TypedDict):
+            interface: str
+            rrname: str
+            ttl: int
+            received_at: float
         rrname = rr.rrname.decode("utf-8", errors="replace")
-        common = dict(interface=interface, rrname=rrname, ttl=rr.ttl, received_at=now)
+        common = _CommonRRFields(interface=interface, rrname=rrname, ttl=rr.ttl, received_at=now)
 
         if rr.type == TYPE_A:
+            assert isinstance(rr.rdata, str)
             record: MDNSResponseRecord = MDNSARecord(**common, address=rr.rdata)
             changed_type = RRNameType.HOSTNAME
         elif rr.type == TYPE_AAAA:
+            assert isinstance(rr.rdata, str)
             record = MDNSAAAARecord(**common, address=rr.rdata)
             changed_type = RRNameType.HOSTNAME
         elif rr.type == TYPE_PTR:
+            assert isinstance(rr.rdata, bytes)
             record = MDNSPTRRecord(**common, target=rr.rdata.decode("utf-8", errors="replace"))
             changed_type = RRNameType.SERVICE_TYPE
         elif rr.type == TYPE_TXT:
+            assert isinstance(rr.rdata, list)
             entries = [e.decode("utf-8", errors="replace") for e in rr.rdata]
             record = MDNSTXTRecord(**common, entries=entries)
             changed_type = RRNameType.INSTANCE_NAME
@@ -589,7 +605,11 @@ class MdnsScanner(BaseScanner):
             logger.warning("Received mDNS packet with no IPV6_PKTINFO ancdata, dropping")
             return
 
-        pkt = DNS(data)
+        try:
+            pkt = DNS(data)
+        except Exception:
+            logger.warning("[%s] Failed to parse mDNS packet from %s, dropping", interface, src_ip, exc_info=True)
+            return
 
         # Skip queries — only responses carry authoritative record data.
         if not pkt.qr:
@@ -600,13 +620,9 @@ class MdnsScanner(BaseScanner):
             interface, src_ip, pkt.ancount, pkt.nscount, pkt.arcount,
         )
 
-        # pkt.an / ancount — Answer section
-        # pkt.ns / nscount — Authority (Nameserver) section
-        # pkt.ar / arcount — Additional Records section
         now = time.time()
-        all_rrs = [section[i]
-                   for count, section in ((pkt.ancount, pkt.an), (pkt.nscount, pkt.ns), (pkt.arcount, pkt.ar))
-                   for i in range(count)]
+        # an=answer records, ns=autoritative nameservers, ar=additional records
+        all_rrs = [rr for section in (pkt.an, pkt.ns, pkt.ar) for rr in section]
 
         changed_rrnames: set[ChangedRRName] = set()
         for rr in all_rrs:
@@ -616,6 +632,8 @@ class MdnsScanner(BaseScanner):
             )
             if changed := self._process_rr(interface, rr, now):
                 changed_rrnames.add(changed)
+        # Putting the cache expirary here in the packet handler with the expectation to have
+        # returned answers regularly to our periodic service query
         changed_rrnames |= self._expire_records(now)
 
         if not changed_rrnames:
