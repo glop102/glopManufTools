@@ -7,6 +7,7 @@ running production server and don't require a unix socket path on disk.
 """
 
 import socket
+import threading
 import time
 from collections import deque
 from select import select
@@ -15,6 +16,7 @@ from typing import Optional
 import pytest
 
 from discovery.client import DiscoveryClient
+from discovery.server import DiscoveryServer
 
 
 # ---------------------------------------------------------------------------
@@ -86,30 +88,45 @@ def _wait_for(sock, command: str, deadline_secs: float = 5.0, **fields) -> list[
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(scope="module")
-def free_port() -> int:
-    """Pick a free TCP port."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-@pytest.fixture(scope="module")
-def server_conn(free_port):
+def server_conn():
     """
-    Spawn the discovery server on a random TCP port, connect as a client, and
-    announce.  Shared for the whole module so the server and TestScanner state
+    Start the discovery server in a thread on a random TCP port, connect as a
+    client, and announce.  Running in-process means pytest-cov can measure
+    server.py coverage.  Module-scoped so the server and TestScanner state
     persist across tests (they are ordered and stateful by design).
     """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+
+    server = DiscoveryServer()
+    thread = threading.Thread(
+        target=server.start,
+        kwargs={"tcp_socket": ("127.0.0.1", port), "persistent": True},
+        daemon=True,
+    )
+    thread.start()
+
+    # Poll until the server is accepting connections.
+    for _ in range(50):
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.1):
+                break
+        except OSError:
+            time.sleep(0.05)
+
     _overflow.clear()
     conn = DiscoveryClient.connect(
-        tcp_socket=("127.0.0.1", free_port),
-        spawn_if_missing=True,
+        tcp_socket=("127.0.0.1", port),
+        spawn_if_missing=False,
     )
     resp = _send_and_expect(conn, {"command": "announce", "type": "client"})
     assert "server_api_version" in resp
     assert "scanners" in resp
     yield conn
     conn.close()
+    server.stop()
+    thread.join(timeout=5.0)
 
 
 # ---------------------------------------------------------------------------
