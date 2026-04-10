@@ -1,0 +1,9 @@
+{ buildPythonApplication, hatchling, pyqt6, discovery }:
+buildPythonApplication {
+  pname = "discovery-applet";
+  version = "0.1.0";
+  pyproject = true;
+  src = ./.;
+  build-system = [ hatchling ];
+  dependencies = [ pyqt6 discovery ];
+}

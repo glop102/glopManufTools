@@ -19,21 +19,17 @@
       );
       # TODO tree formatter to also hit up the ruff formatter
       formatter = forAllSystems (system: self.legacyPackages.${system}.nixfmt-tree);
-      #packages = forAllSystems (system: {
-      #  inherit (self.legacyPackages.${system})
-      #    simplifiedVideoLibraryRenamer
-      #    ;
-      #  default = self.legacyPackages.${system}.simplifiedVideoLibraryRenamer;
-      #});
-      #apps = forAllSystems (system: {
-      #  simplifiedVideoLibraryRenamer = {
-      #    type = "app";
-      #    program = "${
-      #      self.legacyPackages.${system}.simplifiedVideoLibraryRenamer
-      #    }/bin/simplifiedVideoLibraryRenamer";
-      #  };
-      #  default = self.apps.${system}.simplifiedVideoLibraryRenamer;
-      #});
+      packages = forAllSystems (system: {
+        inherit (self.legacyPackages.${system}) discovery-applet;
+        default = self.legacyPackages.${system}.discovery-applet;
+      });
+      apps = forAllSystems (system: {
+        discovery-applet = {
+          type = "app";
+          program = "${self.legacyPackages.${system}.discovery-applet}/bin/discovery-applet";
+        };
+        default = self.apps.${system}.discovery-applet;
+      });
       devShells = forAllSystems (
         system:
         (
@@ -59,6 +55,7 @@
                   pydantic
                   pytest
                   pytest-cov
+                  pyqt6
                 ]);
               shellHook = ''
                 export PS1='\n(dev) \[\033[1;32m\][\[\e]0;\u@\h: \w\a\]\u@\h:\w]\$\[\033[0m\] '
