@@ -47,6 +47,7 @@ class DiscoveryServer:
     _builtin_scanners = {
         "test": "discovery.scanners.test_scanner",
         "mdns.v1": "discovery.scanners.mdns",
+        "lldp.v1": "discovery.scanners.lldp",
     }
 
     def __init__(self):
