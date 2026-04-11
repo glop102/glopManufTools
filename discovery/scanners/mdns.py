@@ -617,6 +617,11 @@ class MdnsScanner(BaseScanner):
 
         changed_records: set[MDNSResponseRecord] = set()
         for rr in all_rrs:
+            if not hasattr(rr, "ttl"):
+                # Some record types (e.g. OPT/type 41) are represented by scapy without
+                # standard DNS RR fields; skip them.
+                logger.debug("[%s]   skipping record with no ttl (type=%s)", interface, getattr(rr, "type", "?"))
+                continue
             logger.debug(
                 "[%s]   %r  type=%s  ttl=%d  rdata=%r",
                 interface, rr.rrname, dnstypes.get(rr.type, rr.type), rr.ttl, getattr(rr, "rdata", None),
