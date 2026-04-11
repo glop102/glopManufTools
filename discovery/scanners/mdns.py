@@ -24,19 +24,6 @@ TYPE_TXT = 16
 TYPE_AAAA = 28
 TYPE_SRV = 33
 
-
-class RRNameType(Enum):
-    HOSTNAME = "hostname"           # rrname is a host, e.g. 'mydevice.local.'       (from A/AAAA)
-    SERVICE_TYPE = "service_type"   # rrname is a service type, e.g. '_ipp._tcp.local.' (from PTR rrname)
-    INSTANCE_NAME = "instance_name" # rrname is a service instance, e.g. 'My Printer._ipp._tcp.local.' (from SRV/TXT)
-
-
-class ChangedRRName(NamedTuple):
-    name: str
-    type: RRNameType
-    interface: str
-
-
 class MDNSResponseRecord(BaseModel, ABC):
     """
     Base class for mDNS wire records. Used only as an internal cache.
@@ -180,6 +167,31 @@ class DNSRecord(Protocol):
     target: bytes
 
 
+
+class RRNameType(Enum):
+    HOSTNAME = "hostname"           # rrname is a host, e.g. 'mydevice.local.'       (from A/AAAA)
+    SERVICE_TYPE = "service_type"   # rrname is a service type, e.g. '_ipp._tcp.local.' (from PTR rrname)
+    INSTANCE_NAME = "instance_name" # rrname is a service instance, e.g. 'My Printer._ipp._tcp.local.' (from SRV/TXT)
+
+class ChangedRRName(NamedTuple):
+    name: str
+    type: RRNameType
+    interface: str
+
+_RR_TYPE_MAP: dict[type, RRNameType] = {
+    MDNSARecord: RRNameType.HOSTNAME,
+    MDNSAAAARecord: RRNameType.HOSTNAME,
+    MDNSPTRRecord: RRNameType.SERVICE_TYPE,
+    MDNSTXTRecord: RRNameType.INSTANCE_NAME,
+    MDNSSRVRecord: RRNameType.INSTANCE_NAME,
+} # A mapping of what the rrname means in the record to the type. Just used for the ChangedRRName class
+
+class __CommonRRFields(TypedDict):
+    # Used for dict explansion but typed to make the linetr happy. Just used for _process_rr
+    interface: str
+    rrname: str
+    ttl: int
+    received_at: float
 
 
 class MdnsScanner(BaseScanner):
@@ -344,6 +356,8 @@ class MdnsScanner(BaseScanner):
         if not self._active_interfaces:
             return
         query_domain = self._params.query_domain.rstrip(".")
+        # Only pick up PTR records in our question records if they were sent in response to our
+        # original top level query domain. ie do not query for MyPrinter._ipp._tcp.local as that is nonsense
         known_service_types = {
             r.target for r in self._record_cache
             if isinstance(r, MDNSPTRRecord) and r.rrname.rstrip(".") == query_domain
@@ -458,13 +472,8 @@ class MdnsScanner(BaseScanner):
         Returns a ChangedRRName if the cache changed meaningfully (record added, removed,
         or content updated), or None for a TTL-only refresh with no data change.
         """
-        class _CommonRRFields(TypedDict):
-            interface: str
-            rrname: str
-            ttl: int
-            received_at: float
         rrname = rr.rrname.decode("utf-8", errors="replace")
-        common = _CommonRRFields(interface=interface, rrname=rrname, ttl=rr.ttl, received_at=now)
+        common = __CommonRRFields(interface=interface, rrname=rrname, ttl=rr.ttl, received_at=now)
 
         if rr.type == TYPE_A:
             assert isinstance(rr.rdata, str)
@@ -523,13 +532,6 @@ class MdnsScanner(BaseScanner):
         Remove all cached records whose TTL has elapsed and return the set of
         ChangedRRNames that were affected.
         """
-        _RR_TYPE_MAP: dict[type, RRNameType] = {
-            MDNSARecord: RRNameType.HOSTNAME,
-            MDNSAAAARecord: RRNameType.HOSTNAME,
-            MDNSPTRRecord: RRNameType.SERVICE_TYPE,
-            MDNSTXTRecord: RRNameType.INSTANCE_NAME,
-            MDNSSRVRecord: RRNameType.INSTANCE_NAME,
-        }
         expired = {r for r in self._record_cache if r.received_at + r.ttl < now}
         self._record_cache -= expired
         return {ChangedRRName(name=r.rrname, type=_RR_TYPE_MAP[type(r)], interface=r.interface) for r in expired}
