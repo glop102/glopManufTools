@@ -1,6 +1,6 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "discovery-applet"
@@ -10,5 +10,8 @@ dependencies = ["pyqt6", "discovery"]
 [project.scripts]
 discovery-applet = "discovery_applet.__main__:main"
 
-[tool.hatch.build.targets.wheel]
+[tool.setuptools.package-dir]
+"discovery_applet" = "."
+
+[tool.setuptools]
 packages = ["discovery_applet"]

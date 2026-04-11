@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 
-from PyQt6.QtCore import Qt, QPoint
+from PyQt6.QtCore import Qt, QPoint, pyqtSlot
 from PyQt6.QtGui import QColor, QFont, QIcon, QPixmap, QCursor
 from PyQt6.QtWidgets import (
     QHeaderView,
@@ -192,6 +192,7 @@ class DiscoveryApplet(QSystemTrayIcon):
     # Slots
     # ------------------------------------------------------------------
 
+    @pyqtSlot(QSystemTrayIcon.ActivationReason)
     def _on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
             if self._popup.isVisible():

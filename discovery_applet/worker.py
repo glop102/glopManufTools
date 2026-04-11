@@ -5,6 +5,8 @@ All blocking I/O lives here; data is pushed to the main thread via Qt signals.
 """
 
 import logging
+import time
+from collections import deque
 from select import select
 
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -23,6 +25,7 @@ class DiscoveryWorker(QThread):
 
     def run(self) -> None:
         self.status_changed.emit("connecting")
+        self._buf: deque[dict] = deque()
 
         try:
             client = DiscoveryClient.connect(spawn_if_missing=True)
@@ -44,14 +47,21 @@ class DiscoveryWorker(QThread):
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _recv(self, client, timeout: float = 5.0) -> dict:
+    def _fill_buf(self, client, timeout: float = 5.0) -> None:
+        """Read from socket into the message buffer, waiting up to timeout."""
         ready, _, _ = select([client], [], [], timeout)
         if not ready:
             raise RuntimeError(f"Timed out after {timeout}s waiting for server response")
         msgs = client.read_msgs()
         if not msgs:
             raise RuntimeError("Connection closed before a message was received")
-        return msgs[0]
+        self._buf.extend(msgs)
+
+    def _recv(self, client, timeout: float = 5.0) -> dict:
+        """Return the next buffered message, refilling from the socket if needed."""
+        if not self._buf:
+            self._fill_buf(client, timeout)
+        return self._buf.popleft()
 
     def _setup(self, client) -> None:
         """Announce, ensure mdns.v1 is running, activate interfaces, seed UI."""
@@ -66,7 +76,6 @@ class DiscoveryWorker(QThread):
             start_resp = self._recv(client)
             if start_resp.get("status") != "accepted":
                 raise RuntimeError(f"start_builtin_scanner rejected: {start_resp}")
-            # Wait for available_scanners_changed confirming mdns.v1 is up
             if not self._wait_for_scanner(client, "mdns.v1"):
                 raise RuntimeError("mdns.v1 did not start within timeout")
 
@@ -82,9 +91,9 @@ class DiscoveryWorker(QThread):
                 "scanner": "mdns.v1",
                 "interfaces": active,
             })
-            self._recv(client)  # consume accepted
+            self._recv(client)  # consume status: accepted
 
-        # 4. Seed UI with existing results
+        # 4. Seed UI with any results already known to the server
         client.send_msg({"command": "get_results", "scanner": "mdns.v1"})
         results_resp = self._recv(client)
         for entry in results_resp.get("results", []):
@@ -95,29 +104,34 @@ class DiscoveryWorker(QThread):
     def _wait_for_scanner(self, client, scanner_name: str) -> bool:
         """
         Drain messages until available_scanners_changed includes scanner_name,
-        or the timeout elapses.  Returns True if found.
+        or the timeout elapses. Returns True if found.
         """
-        import time
         deadline = time.monotonic() + _STARTUP_TIMEOUT
         while time.monotonic() < deadline:
-            remaining = deadline - time.monotonic()
-            ready, _, _ = select([client], [], [], min(remaining, 0.5))
-            if not ready:
-                continue
-            msgs = client.read_msgs()
-            if not msgs:
-                raise RuntimeError("Connection closed while waiting for scanner start")
-            for msg in msgs:
+            # Drain any already-buffered messages first
+            while self._buf:
+                msg = self._buf.popleft()
                 if (
                     msg.get("command") == "available_scanners_changed"
                     and scanner_name in msg.get("scanners", [])
                 ):
                     return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                self._fill_buf(client, timeout=min(remaining, 0.5))
+            except RuntimeError:
+                pass  # timeout on this iteration is fine, keep looping
         return False
 
     def _loop(self, client) -> None:
         """Main event loop — forwards scan results to the UI thread via signals."""
         while not self.isInterruptionRequested():
+            # Process any messages already in the buffer before blocking on select
+            while self._buf:
+                self._handle_msg(client, self._buf.popleft())
+
             ready, _, _ = select([client], [], [], 0.5)
             if not ready:
                 continue
@@ -130,13 +144,25 @@ class DiscoveryWorker(QThread):
                 break
 
             for msg in msgs:
-                match msg.get("command"):
-                    case "scan_results_update":
-                        for entry in msg.get("results", []):
-                            self.hosts_updated.emit(entry["key"], entry["result"])
-                    case "scan_results_remove":
-                        keys = msg.get("keys", [])
-                        if keys:
-                            self.hosts_removed.emit(keys)
-                    case _:
-                        pass  # available_interfaces_changed, parameters_changed, etc.
+                self._handle_msg(client, msg)
+
+    def _handle_msg(self, client, msg: dict) -> None:
+        match msg.get("command"):
+            case "scan_results_update":
+                for entry in msg.get("results", []):
+                    self.hosts_updated.emit(entry["key"], entry["result"])
+            case "scan_results_remove":
+                keys = msg.get("keys", [])
+                if keys:
+                    self.hosts_removed.emit(keys)
+            case "available_interfaces_changed":
+                available: list[str] = msg.get("interfaces", [])
+                active = [i for i in available if not i.startswith("lo")]
+                if active:
+                    client.send_msg({
+                        "command": "set_active_interfaces",
+                        "scanner": "mdns.v1",
+                        "interfaces": active,
+                    })
+            case _:
+                pass
