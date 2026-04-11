@@ -24,7 +24,6 @@ from discovery.client import DiscoveryClient
 from discovery.scanners.mdns import (
     TYPE_A, TYPE_AAAA, TYPE_PTR, TYPE_SRV, TYPE_TXT,
     MDNSARecord, MDNSAAAARecord, MDNSPTRRecord, MDNSTXTRecord, MDNSSRVRecord,
-    ChangedRRName, RRNameType,
     MdnsScanner,
 )
 
@@ -234,7 +233,9 @@ class TestProcessRR:
     def test_new_a_record_added(self, scanner_unit):
         rr = _rr(b"mydevice.local.", TYPE_A, 120, "192.168.1.1")
         result = scanner_unit._process_rr("eth0", rr, _NOW)
-        assert result == ChangedRRName(name="mydevice.local.", type=RRNameType.HOSTNAME, interface="eth0")
+        assert isinstance(result, MDNSARecord)
+        assert result.rrname == "mydevice.local."
+        assert result.interface == "eth0"
         assert len(scanner_unit._record_cache) == 1
 
     def test_ttl_refresh_returns_none(self, scanner_unit):
@@ -249,7 +250,9 @@ class TestProcessRR:
         scanner_unit._process_rr("eth0", rr, _NOW)
         goodbye = _rr(b"mydevice.local.", TYPE_A, 0, "192.168.1.1")
         result = scanner_unit._process_rr("eth0", goodbye, _NOW + 1)
-        assert result == ChangedRRName(name="mydevice.local.", type=RRNameType.HOSTNAME, interface="eth0")
+        assert isinstance(result, MDNSARecord)
+        assert result.rrname == "mydevice.local."
+        assert result.interface == "eth0"
         assert len(scanner_unit._record_cache) == 0
 
     def test_goodbye_unseen_returns_none(self, scanner_unit):
@@ -261,24 +264,22 @@ class TestProcessRR:
     def test_ptr_returns_service_type(self, scanner_unit):
         rr = _rr(b"_http._tcp.local.", TYPE_PTR, 120, b"My Service._http._tcp.local.")
         result = scanner_unit._process_rr("eth0", rr, _NOW)
-        assert result is not None
-        assert result.type == RRNameType.SERVICE_TYPE
-        assert result.name == "_http._tcp.local."
+        assert isinstance(result, MDNSPTRRecord)
+        assert result.rrname == "_http._tcp.local."
 
     def test_srv_returns_instance_name(self, scanner_unit):
         rr = _srv_rr()
         result = scanner_unit._process_rr("eth0", rr, _NOW)
-        assert result is not None
-        assert result.type == RRNameType.INSTANCE_NAME
-        assert result.name == "My Service._http._tcp.local."
+        assert isinstance(result, MDNSSRVRecord)
+        assert result.rrname == "My Service._http._tcp.local."
 
     def test_txt_content_change_detected(self, scanner_unit):
         rr1 = _rr(b"My Service._http._tcp.local.", TYPE_TXT, 120, [b"path=/old"])
         scanner_unit._process_rr("eth0", rr1, _NOW)
         rr2 = _rr(b"My Service._http._tcp.local.", TYPE_TXT, 120, [b"path=/new"])
         result = scanner_unit._process_rr("eth0", rr2, _NOW + 1)
-        assert result is not None
-        assert result.type == RRNameType.INSTANCE_NAME
+        assert isinstance(result, MDNSTXTRecord)
+        assert result.rrname == "My Service._http._tcp.local."
 
     def test_txt_ttl_refresh_silent(self, scanner_unit):
         rr = _rr(b"My Service._http._tcp.local.", TYPE_TXT, 120, [b"path=/"])
@@ -289,8 +290,8 @@ class TestProcessRR:
     def test_srv_content_change_detected(self, scanner_unit):
         scanner_unit._process_rr("eth0", _srv_rr(port=80), _NOW)
         result = scanner_unit._process_rr("eth0", _srv_rr(port=8080), _NOW + 1)
-        assert result is not None
-        assert result.type == RRNameType.INSTANCE_NAME
+        assert isinstance(result, MDNSSRVRecord)
+        assert result.rrname == "My Service._http._tcp.local."
 
     def test_unsupported_type_returns_none(self, scanner_unit):
         rr = _rr(b"weird.local.", 99, 120, b"whatever")
@@ -327,10 +328,10 @@ class TestExpireRecords:
             _srv(ttl=1, received_at=t),
         }
         expired = scanner_unit._expire_records(_NOW)
-        types = {cr.type for cr in expired}
-        assert RRNameType.HOSTNAME in types
-        assert RRNameType.SERVICE_TYPE in types
-        assert RRNameType.INSTANCE_NAME in types
+        record_types = {type(r) for r in expired}
+        assert MDNSARecord in record_types or MDNSAAAARecord in record_types  # hostname records
+        assert MDNSPTRRecord in record_types                                  # service type records
+        assert MDNSSRVRecord in record_types or MDNSTXTRecord in record_types # instance name records
 
     def test_empty_cache_returns_empty_set(self, scanner_unit):
         result = scanner_unit._expire_records(_NOW)
@@ -343,13 +344,13 @@ class TestExpireRecords:
 
 class TestResolveAffectedHostnames:
     def test_hostname_resolves_directly(self, scanner_unit):
-        changed = {ChangedRRName("mydevice.local.", RRNameType.HOSTNAME, "eth0")}
+        changed = {_a(interface="eth0", rrname="mydevice.local.")}
         result = scanner_unit._resolve_affected_hostnames(changed)
         assert result == {("eth0", "mydevice.local.")}
 
     def test_instance_name_follows_srv(self, scanner_unit):
         scanner_unit._record_cache.add(_srv(interface="eth0", target="mydevice.local."))
-        changed = {ChangedRRName("My Service._http._tcp.local.", RRNameType.INSTANCE_NAME, "eth0")}
+        changed = {_txt(interface="eth0", rrname="My Service._http._tcp.local.")}
         result = scanner_unit._resolve_affected_hostnames(changed)
         assert result == {("eth0", "mydevice.local.")}
 
@@ -358,17 +359,17 @@ class TestResolveAffectedHostnames:
             _ptr(interface="eth0"),
             _srv(interface="eth0", target="mydevice.local."),
         }
-        changed = {ChangedRRName("_http._tcp.local.", RRNameType.SERVICE_TYPE, "eth0")}
+        changed = {_ptr(interface="eth0", rrname="_http._tcp.local.")}
         result = scanner_unit._resolve_affected_hostnames(changed)
         assert result == {("eth0", "mydevice.local.")}
 
     def test_instance_name_no_srv_returns_empty(self, scanner_unit):
-        changed = {ChangedRRName("My Service._http._tcp.local.", RRNameType.INSTANCE_NAME, "eth0")}
+        changed = {_txt(interface="eth0", rrname="My Service._http._tcp.local.")}
         result = scanner_unit._resolve_affected_hostnames(changed)
         assert result == set()
 
     def test_service_type_no_ptr_returns_empty(self, scanner_unit):
-        changed = {ChangedRRName("_http._tcp.local.", RRNameType.SERVICE_TYPE, "eth0")}
+        changed = {_ptr(interface="eth0", rrname="_http._tcp.local.")}
         result = scanner_unit._resolve_affected_hostnames(changed)
         assert result == set()
 
@@ -377,7 +378,7 @@ class TestResolveAffectedHostnames:
             _srv(interface="eth0",  rrname="Svc._http._tcp.local.", target="host.local."),
             _srv(interface="wlan0", rrname="Svc._http._tcp.local.", target="host.local."),
         }
-        changed = {ChangedRRName("Svc._http._tcp.local.", RRNameType.INSTANCE_NAME, "eth0")}
+        changed = {_txt(interface="eth0", rrname="Svc._http._tcp.local.")}
         result = scanner_unit._resolve_affected_hostnames(changed)
         assert result == {("eth0", "host.local.")}
 
