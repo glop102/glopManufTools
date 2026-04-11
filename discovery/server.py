@@ -54,6 +54,7 @@ class DiscoveryServer:
         self.unannounced_connections: list[MsgSocket] = []
         self.clients: list[MsgSocket] = []
         self.scanners: list[ScannerConnection] = []
+        self.socket_path: Optional[Path] = None
 
     def open_server_socket(
         self,
@@ -82,6 +83,17 @@ class DiscoveryServer:
                     unix_path = Path("/tmp/glopmanuf/discovery")
 
             unix_path.parent.mkdir(exist_ok=True, parents=True)
+            if unix_path.exists():
+                # Probe for a live server; unlink the file if it's stale.
+                probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                try:
+                    probe.connect(unix_path.as_posix())
+                    probe.close()
+                    raise OSError(f"Another discovery server is already listening at {unix_path}")
+                except ConnectionRefusedError:
+                    unix_path.unlink()
+                finally:
+                    probe.close()
             self.socket = socket.socket(family=socket.AF_UNIX, type=socket.SOCK_STREAM)
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             logger.info(f"Opening discovery server socket at {unix_path}")

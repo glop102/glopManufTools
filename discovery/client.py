@@ -85,4 +85,6 @@ class DiscoveryClient(MsgSocket):
         elif unix_socket_path:
             args += ["--unix-socket", str(unix_socket_path)]
 
-        subprocess.Popen(args, start_new_session=True)
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.pathsep.join(p for p in sys.path if p)
+        subprocess.Popen(args, start_new_session=True, env=env)

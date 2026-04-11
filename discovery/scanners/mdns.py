@@ -340,10 +340,17 @@ class MdnsScanner(BaseScanner):
         })
 
     def _send_query(self) -> None:
-        """Send a PTR query for query_domain out on every active interface."""
+        """Send PTR queries: one for the top-level meta-domain plus one per known service type."""
         if not self._active_interfaces:
             return
-        pkt = bytes(DNS(rd=0, qd=DNSQR(qname=self._params.query_domain, qtype="PTR")))
+        query_domain = self._params.query_domain.rstrip(".")
+        known_service_types = {
+            r.target for r in self._record_cache
+            if isinstance(r, MDNSPTRRecord) and r.rrname.rstrip(".") == query_domain
+        }
+        questions = [DNSQR(qname=self._params.query_domain, qtype="PTR")]
+        questions += [DNSQR(qname=stype, qtype="PTR") for stype in known_service_types]
+        pkt = bytes(DNS(rd=0, qd=questions))
         for iface in self._active_interfaces:
             self._mdns_listener.setsockopt(
                 socket.IPPROTO_IPV6,
@@ -351,7 +358,10 @@ class MdnsScanner(BaseScanner):
                 struct.pack("I", socket.if_nametoindex(iface)),
             )
             self._mdns_listener.sendto(pkt, (self._params.multicast_group, self._params.port))
-            logger.debug("[%s] sent mDNS query for %s", iface, self._params.query_domain)
+            logger.debug(
+                "[%s] sent mDNS query for %s + %d service type(s)",
+                iface, self._params.query_domain, len(known_service_types),
+            )
 
     def _handle_server_msgs(self) -> None:
         assert(self.server is not None)
@@ -411,6 +421,9 @@ class MdnsScanner(BaseScanner):
                 case "clear_cache":
                     logger.debug("clear_cache received")
                     self._clear_cache()
+
+                case "status":
+                    pass  # announce acknowledgement from server
 
                 case "stop_scanner":
                     logger.info("stop_scanner received, shutting down")
@@ -621,7 +634,7 @@ class MdnsScanner(BaseScanner):
         )
 
         now = time.time()
-        # an=answer records, ns=autoritative nameservers, ar=additional records
+        # an=answer records, ns=authoritative nameservers, ar=additional records
         all_rrs = [rr for section in (pkt.an, pkt.ns, pkt.ar) for rr in section]
 
         changed_rrnames: set[ChangedRRName] = set()
@@ -666,6 +679,7 @@ class MdnsScanner(BaseScanner):
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     scanner = MdnsScanner()
     # This fills out some basic information required to connect to the discovery server
     # It is done this way to enable the in-place re-exec style of privlege elevation

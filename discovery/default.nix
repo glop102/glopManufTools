@@ -1,12 +1,9 @@
-{ buildPythonPackage, hatchling, pydantic, scapy, lib }:
+{ buildPythonPackage, setuptools, pydantic, scapy }:
 buildPythonPackage {
   pname = "discovery";
   version = "0.1.0";
   pyproject = true;
-  src = lib.cleanSourceWith {
-    src = ../.;
-    filter = path: type: lib.hasPrefix (toString ../discovery) path;
-  };
-  build-system = [ hatchling ];
+  src = ./.;
+  build-system = [ setuptools ];
   dependencies = [ pydantic scapy ];
 }
