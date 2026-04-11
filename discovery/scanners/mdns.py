@@ -7,8 +7,7 @@ import time
 from select import select
 from discovery.scanners.base_scanner import BaseScanner
 from abc import ABC, abstractmethod
-from enum import Enum
-from typing import NamedTuple, Optional, Protocol, TypedDict
+from typing import Optional, Protocol, TypedDict
 
 from pydantic import BaseModel, ConfigDict
 from scapy.layers.dns import DNS, DNSQR, dnstypes
@@ -168,25 +167,8 @@ class DNSRecord(Protocol):
 
 
 
-class RRNameType(Enum):
-    HOSTNAME = "hostname"           # rrname is a host, e.g. 'mydevice.local.'       (from A/AAAA)
-    SERVICE_TYPE = "service_type"   # rrname is a service type, e.g. '_ipp._tcp.local.' (from PTR rrname)
-    INSTANCE_NAME = "instance_name" # rrname is a service instance, e.g. 'My Printer._ipp._tcp.local.' (from SRV/TXT)
 
-class ChangedRRName(NamedTuple):
-    name: str
-    type: RRNameType
-    interface: str
-
-_RR_TYPE_MAP: dict[type, RRNameType] = {
-    MDNSARecord: RRNameType.HOSTNAME,
-    MDNSAAAARecord: RRNameType.HOSTNAME,
-    MDNSPTRRecord: RRNameType.SERVICE_TYPE,
-    MDNSTXTRecord: RRNameType.INSTANCE_NAME,
-    MDNSSRVRecord: RRNameType.INSTANCE_NAME,
-} # A mapping of what the rrname means in the record to the type. Just used for the ChangedRRName class
-
-class __CommonRRFields(TypedDict):
+class _CommonRRFields(TypedDict):
     # Used for dict explansion but typed to make the linetr happy. Just used for _process_rr
     interface: str
     rrname: str
@@ -466,35 +448,30 @@ class MdnsScanner(BaseScanner):
             })
 
 
-    def _process_rr(self, interface: str, rr: DNSRecord, now: float) -> ChangedRRName | None:
+    def _process_rr(self, interface: str, rr: DNSRecord, now: float) -> MDNSResponseRecord | None:
         """
         Upsert or remove one DNS resource record in the internal cache.
-        Returns a ChangedRRName if the cache changed meaningfully (record added, removed,
+        Returns the record if the cache changed meaningfully (record added, removed,
         or content updated), or None for a TTL-only refresh with no data change.
         """
         rrname = rr.rrname.decode("utf-8", errors="replace")
-        common = __CommonRRFields(interface=interface, rrname=rrname, ttl=rr.ttl, received_at=now)
+        common = _CommonRRFields(interface=interface, rrname=rrname, ttl=rr.ttl, received_at=now)
 
         if rr.type == TYPE_A:
             assert isinstance(rr.rdata, str)
             record: MDNSResponseRecord = MDNSARecord(**common, address=rr.rdata)
-            changed_type = RRNameType.HOSTNAME
         elif rr.type == TYPE_AAAA:
             assert isinstance(rr.rdata, str)
             record = MDNSAAAARecord(**common, address=rr.rdata)
-            changed_type = RRNameType.HOSTNAME
         elif rr.type == TYPE_PTR:
             assert isinstance(rr.rdata, bytes)
             record = MDNSPTRRecord(**common, target=rr.rdata.decode("utf-8", errors="replace"))
-            changed_type = RRNameType.SERVICE_TYPE
         elif rr.type == TYPE_TXT:
             assert isinstance(rr.rdata, list)
             entries = [e.decode("utf-8", errors="replace") for e in rr.rdata]
             record = MDNSTXTRecord(**common, entries=entries)
-            changed_type = RRNameType.INSTANCE_NAME
         elif rr.type == TYPE_SRV:
             record = MDNSSRVRecord(**common, priority=rr.priority, weight=rr.weight, port=rr.port, target=rr.target.decode("utf-8", errors="replace"))
-            changed_type = RRNameType.INSTANCE_NAME
         else:
             logger.debug("[%s] skipping unsupported record type %s", interface, dnstypes.get(rr.type, rr.type))
             return None
@@ -504,13 +481,13 @@ class MdnsScanner(BaseScanner):
             if record in self._record_cache:
                 self._record_cache.discard(record)
                 logger.debug("[%s] removed record %r %s", interface, rrname, dnstypes.get(rr.type, rr.type))
-                return ChangedRRName(name=rrname, type=changed_type, interface=interface)
+                return record
             return None
 
         existing = next((r for r in self._record_cache if r == record), None)
         if existing is None:
             self._record_cache.add(record)
-            return ChangedRRName(name=rrname, type=changed_type, interface=interface)
+            return record
 
         # Record already exists. For A/AAAA/PTR the data is part of the identity key,
         # so equal records are always identical — this is just a TTL refresh.
@@ -525,39 +502,38 @@ class MdnsScanner(BaseScanner):
 
         self._record_cache.discard(existing)
         self._record_cache.add(record)
-        return ChangedRRName(name=rrname, type=changed_type, interface=interface) if content_changed else None
+        return record if content_changed else None
 
-    def _expire_records(self, now: float) -> set[ChangedRRName]:
+    def _expire_records(self, now: float) -> set[MDNSResponseRecord]:
         """
-        Remove all cached records whose TTL has elapsed and return the set of
-        ChangedRRNames that were affected.
+        Remove all cached records whose TTL has elapsed and return the expired records.
         """
         expired = {r for r in self._record_cache if r.received_at + r.ttl < now}
         self._record_cache -= expired
-        return {ChangedRRName(name=r.rrname, type=_RR_TYPE_MAP[type(r)], interface=r.interface) for r in expired}
+        return expired
 
-    def _resolve_affected_hostnames(self, changed: set[ChangedRRName]) -> set[tuple[str, str]]:
+    def _resolve_affected_hostnames(self, changed: set[MDNSResponseRecord]) -> set[tuple[str, str]]:
         """
-        Walk changed rrnames to find all (interface, hostname) pairs that need updating.
+        Walk changed records to find all (interface, hostname) pairs that need updating.
 
-        - HOSTNAME:      directly affected
-        - INSTANCE_NAME: follow SRV record target to get the hostname
-        - SERVICE_TYPE:  follow PTR targets (instance names) then SRV targets to get hostnames
+        - A/AAAA:   directly affected hostname
+        - SRV/TXT:  follow SRV target to get the hostname
+        - PTR:      follow PTR targets (instance names) then SRV targets to get hostnames
         """
         affected: set[tuple[str, str]] = set()
-        for cr in changed:
-            if cr.type == RRNameType.HOSTNAME:
-                affected.add((cr.interface, cr.name))
-            elif cr.type == RRNameType.INSTANCE_NAME:
-                for r in self._record_cache:
-                    if isinstance(r, MDNSSRVRecord) and r.rrname == cr.name and r.interface == cr.interface:
-                        affected.add((r.interface, r.target))
-            elif cr.type == RRNameType.SERVICE_TYPE:
+        for r in changed:
+            if isinstance(r, (MDNSARecord, MDNSAAAARecord)):
+                affected.add((r.interface, r.rrname))
+            elif isinstance(r, (MDNSSRVRecord, MDNSTXTRecord)):
+                for srv in self._record_cache:
+                    if isinstance(srv, MDNSSRVRecord) and srv.rrname == r.rrname and srv.interface == r.interface:
+                        affected.add((srv.interface, srv.target))
+            elif isinstance(r, MDNSPTRRecord):
                 for ptr in self._record_cache:
-                    if not (isinstance(ptr, MDNSPTRRecord) and ptr.rrname == cr.name and ptr.interface == cr.interface):
+                    if not (isinstance(ptr, MDNSPTRRecord) and ptr.rrname == r.rrname and ptr.interface == r.interface):
                         continue
                     for srv in self._record_cache:
-                        if isinstance(srv, MDNSSRVRecord) and srv.rrname == ptr.target and srv.interface == cr.interface:
+                        if isinstance(srv, MDNSSRVRecord) and srv.rrname == ptr.target and srv.interface == r.interface:
                             affected.add((srv.interface, srv.target))
         return affected
 
@@ -639,22 +615,22 @@ class MdnsScanner(BaseScanner):
         # an=answer records, ns=authoritative nameservers, ar=additional records
         all_rrs = [rr for section in (pkt.an, pkt.ns, pkt.ar) for rr in section]
 
-        changed_rrnames: set[ChangedRRName] = set()
+        changed_records: set[MDNSResponseRecord] = set()
         for rr in all_rrs:
             logger.debug(
                 "[%s]   %r  type=%s  ttl=%d  rdata=%r",
                 interface, rr.rrname, dnstypes.get(rr.type, rr.type), rr.ttl, getattr(rr, "rdata", None),
             )
             if changed := self._process_rr(interface, rr, now):
-                changed_rrnames.add(changed)
-        # Putting the cache expirary here in the packet handler with the expectation to have
+                changed_records.add(changed)
+        # Putting the cache expiry here in the packet handler with the expectation to have
         # returned answers regularly to our periodic service query
-        changed_rrnames |= self._expire_records(now)
+        changed_records |= self._expire_records(now)
 
-        if not changed_rrnames:
+        if not changed_records:
             return
 
-        affected = self._resolve_affected_hostnames(changed_rrnames)
+        affected = self._resolve_affected_hostnames(changed_records)
         if not affected:
             return
 
