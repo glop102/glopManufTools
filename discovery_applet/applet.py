@@ -70,6 +70,7 @@ class ContextMenu(QWidget):
 
     def popup(self, pos: QPoint) -> None:
         self.adjustSize()
+        self.setFixedSize(self.size())  # min==max → tiling WMs auto-float fixed-size windows
         self.move(pos)
         self.show()
         self.raise_()
