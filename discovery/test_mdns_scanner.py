@@ -21,6 +21,7 @@ import pytest
 from scapy.layers.dns import DNS, DNSRR, DNSRRSRV
 
 from discovery.client import DiscoveryClient
+from discovery.server import DiscoveryServer
 from discovery.scanners.mdns import (
     TYPE_A, TYPE_AAAA, TYPE_PTR, TYPE_SRV, TYPE_TXT,
     MDNSARecord, MDNSAAAARecord, MDNSPTRRecord, MDNSTXTRecord, MDNSSRVRecord,
@@ -161,14 +162,29 @@ def free_udp_port():
 @pytest.fixture
 def server_conn(free_tcp_port):
     _overflow.clear()
+    server = DiscoveryServer()
+    server_thread = threading.Thread(
+        target=server.start,
+        kwargs={"tcp_socket": ("127.0.0.1", free_tcp_port), "persistent": True},
+        daemon=True,
+    )
+    server_thread.start()
+    for _ in range(50):
+        try:
+            with socket.create_connection(("127.0.0.1", free_tcp_port), timeout=0.1):
+                break
+        except OSError:
+            time.sleep(0.05)
     conn = DiscoveryClient.connect(
         tcp_socket=("127.0.0.1", free_tcp_port),
-        spawn_if_missing=True,
+        spawn_if_missing=False,
     )
     resp = _send_and_expect(conn, {"command": "announce", "type": "client"})
     assert "server_api_version" in resp
     yield conn
     conn.close()
+    server.stop()
+    server_thread.join(timeout=5.0)
 
 
 @pytest.fixture

@@ -221,7 +221,10 @@ class DiscoveryServer:
 
     def _broadcast_to_clients(self, msg: dict) -> None:
         for client in self.clients:
-            client.send_msg(msg, send_synchronous=False)
+            try:
+                client.send_msg(msg, send_synchronous=False)
+            except ConnectionError:
+                logger.info("Client disconnected during broadcast, will be cleaned up by main loop")
 
     def _handle_unannounced_msgs(self, conn: MsgSocket, messages: list[dict]):
         for msg in messages:
