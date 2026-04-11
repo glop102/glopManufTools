@@ -9,7 +9,9 @@ import logging
 from PyQt6.QtCore import Qt, QPoint, pyqtSlot
 from PyQt6.QtGui import QColor, QFont, QIcon, QPixmap, QCursor
 from PyQt6.QtWidgets import (
+    QApplication,
     QHeaderView,
+    QPushButton,
     QScrollArea,
     QSystemTrayIcon,
     QTreeWidget,
@@ -36,6 +38,54 @@ def _fallback_icon() -> QIcon:
     painter.drawEllipse(3, 3, 16, 16)
     painter.end()
     return QIcon(pixmap)
+
+
+class ContextMenu(QWidget):
+    """
+    A frameless tool window that acts as a right-click context menu.
+
+    Using QMenu on Wayland causes "Failed to create grabbing popup" errors
+    because QMenu creates an xdg_popup surface which requires an input serial
+    from a recent user event. A plain QWidget tool window (xdg_toplevel) has
+    no such restriction.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint)
+        self.setObjectName("ContextMenu")
+        self.setStyleSheet("""
+            #ContextMenu { background: palette(window); border: 1px solid palette(mid); }
+            QPushButton { text-align: left; padding: 6px 16px; border: none; background: transparent; }
+            QPushButton:hover { background: palette(highlight); color: palette(highlighted-text); }
+        """)
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(0)
+
+    def add_action(self, label: str, callback) -> None:
+        btn = QPushButton(label)
+        btn.clicked.connect(callback)
+        btn.clicked.connect(self.hide)
+        self._layout.addWidget(btn)
+
+    def popup(self, pos: QPoint) -> None:
+        self.adjustSize()
+        self.move(pos)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def focusOutEvent(self, event):
+        focused = QApplication.focusWidget()
+        if focused is None or not self.isAncestorOf(focused):
+            self.hide()
+        super().focusOutEvent(event)
+
+    def changeEvent(self, event):
+        from PyQt6.QtCore import QEvent
+        if event.type() == QEvent.Type.ActivationChange and not self.isActiveWindow():
+            self.hide()
+        super().changeEvent(event)
 
 
 class HostPopup(QWidget):
@@ -153,7 +203,6 @@ class HostPopup(QWidget):
 
     def focusOutEvent(self, event):
         # Only hide if focus moved outside this widget hierarchy
-        from PyQt6.QtWidgets import QApplication
         focused = QApplication.focusWidget()
         if focused is None or not self.isAncestorOf(focused):
             self.hide()
@@ -181,6 +230,14 @@ class DiscoveryApplet(QSystemTrayIcon):
         self.activated.connect(self._on_activated)
         self._update_tooltip()
 
+        # Context menu (right-click)
+        # ContextMenu is a plain QWidget tool window instead of QMenu to avoid
+        # the Wayland xdg_popup serial requirement that causes "Failed to create
+        # grabbing popup" on compositors like Sway.
+        self._menu = ContextMenu()
+        self._menu.add_action("Start mdns.v1 scanner", self._on_start_mdns_scanner)
+        self._menu.add_action("Stop all scanners", self._on_stop_all_scanners)
+
         # Worker thread
         self.worker = DiscoveryWorker()
         self.worker.hosts_updated.connect(self._on_host_updated)
@@ -199,6 +256,9 @@ class DiscoveryApplet(QSystemTrayIcon):
                 self._popup.hide()
             else:
                 self._show_popup()
+        elif reason == QSystemTrayIcon.ActivationReason.Context:
+            self._popup.hide()
+            self._menu.popup(QCursor.pos())
 
     def _on_host_updated(self, key: str, host: dict) -> None:
         self._hosts[key] = host
@@ -216,6 +276,14 @@ class DiscoveryApplet(QSystemTrayIcon):
     def _on_status_changed(self, status: str) -> None:
         logger.info("Discovery status: %s", status)
         self.setToolTip(f"Discovery — {status}")
+
+    def _on_start_mdns_scanner(self) -> None:
+        logger.info("Requesting start of mdns.v1 scanner")
+        self.worker.start_mdns_scanner()
+
+    def _on_stop_all_scanners(self) -> None:
+        logger.info("Requesting stop for all scanners")
+        self.worker.stop_all_scanners()
 
     # ------------------------------------------------------------------
     # Helpers
