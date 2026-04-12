@@ -3,6 +3,10 @@ import logging
 import socket
 import struct
 from select import select
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pydantic import BaseModel
 
 logger = logging.getLogger("discovery")
 
@@ -60,6 +64,10 @@ class MsgSocket:
 
     def msg_data_write_queued(self) -> bool:
         return len(self._write_buf) > 0
+
+    def send_cmd(self, model: "BaseModel", *, send_synchronous: bool = True) -> None:
+        """Send a pydantic command model, serialised to JSON with None fields omitted."""
+        self.send_msg(model.model_dump(exclude_none=True), send_synchronous=send_synchronous)
 
     def send_msg(self, msg: str | dict, send_synchronous: bool = True) -> None:
         """
