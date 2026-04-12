@@ -399,9 +399,8 @@ class TestClientCommands:
         _send_and_expect(client, {"command": "start_builtin_scanner", "scanner": "does.not.exist"}, expected_status="rejected")
 
     def test_unknown_command_does_not_crash_server(self, client):
-        # Server logs a warning but sends no response; subsequent valid commands still work.
-        client.send_msg({"command": "totally_unknown_xyz"})
-        time.sleep(0.2)
+        # Server rejects unknown commands and subsequent valid commands still work.
+        _send_and_expect(client, {"command": "totally_unknown_xyz"}, expected_status="rejected")
         resp = _send_and_expect(client, {"command": "get_builtin_scanners"})
         assert "scanners" in resp
 

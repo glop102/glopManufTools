@@ -9,10 +9,50 @@ from pathlib import Path
 from typing import Optional, Self
 import logging
 
+from pydantic import ValidationError
+
+from .commands import (
+    AnnounceMessageAdapter,
+    ClientClearCache,
+    ClientGetBuiltinScanners,
+    ClientGetRegisteredScanner,
+    ClientGetRegisteredScanners,
+    ClientGetResult,
+    ClientGetResults,
+    ClientGetScannerActiveInterfaces,
+    ClientGetScannerAvailableInterfaces,
+    ClientGetScannerParameters,
+    ClientMessageAdapter,
+    ClientSetActiveInterfaces,
+    ClientSetScannerParameters,
+    ClientStartBuiltinScanner,
+    ClientStopScanner,
+    ParameterUpdate,
+    ScannerActiveInterfacesChanged,
+    ScannerAnnounce,
+    ScannerAvailableInterfacesChanged,
+    ScannerMessageAdapter,
+    ScannerParametersChanged,
+    ScannerResultsRemove,
+    ScannerResultsUpdate,
+    ScanResultItem,
+    ServerActiveInterfacesChanged,
+    ServerAvailableInterfacesChanged,
+    ServerAvailableScannersChanged,
+    ServerClearCache,
+    ServerParametersChanged,
+    ServerResultsRemove,
+    ServerResultsUpdate,
+    ServerSetActiveInterfaces,
+    ServerSetScannerParameters,
+    ServerStopScanner,
+    StatusResponse,
+)
 from .msg_socket import MsgSocket
 from ._utils import _parse_tcp_socket
 
 logger = logging.getLogger("discovery")
+
 
 
 class ScannerConnection(MsgSocket):
@@ -29,10 +69,10 @@ class ScannerConnection(MsgSocket):
         self.active_interfaces: list[str] = []
         self.results: dict[str, dict] = {}  # key -> serialized result dict
 
-    def first_connection_setup(self, announce_message: dict) -> None:
-        self.name = announce_message.get("name", "")
-        self.parameters = announce_message.get("parameters", {})
-        self.interfaces = announce_message.get("interfaces", [])
+    def first_connection_setup(self, announce: ScannerAnnounce) -> None:
+        self.name = announce.name
+        self.parameters = announce.parameters
+        self.interfaces = announce.interfaces
         self.active_interfaces = []
         self.results = {}
 
@@ -226,464 +266,235 @@ class DiscoveryServer:
             except ConnectionError:
                 logger.info("Client disconnected during broadcast, will be cleaned up by main loop")
 
+    def _broadcast_to_clients_cmd(self, model) -> None:
+        for client in self.clients:
+            try:
+                client.send_cmd(model, send_synchronous=False)
+            except ConnectionError:
+                logger.info("Client disconnected during broadcast, will be cleaned up by main loop")
+
     def _handle_unannounced_msgs(self, conn: MsgSocket, messages: list[dict]):
-        for msg in messages:
-            match msg.get("command"):
-                case "announce":
-                    match msg.get("type"):
-                        case "scanner":
-                            scanner_name = msg.get("name", "")
-                            if (
-                                self._lookup_registered_scanner(scanner_name)
-                                is not None
-                            ):
-                                logger.warning(
-                                    f"Rejected duplicate scanner announce for {scanner_name!r}"
-                                )
-                                conn.send_msg(
-                                    {
-                                        "command": "status",
-                                        "status": "rejected",
-                                        "reason": f"A scanner named {scanner_name!r} is already registered",
-                                    },
-                                    send_synchronous=False,
-                                )
-                                continue
-                            self.unannounced_connections.remove(conn)
-                            scanner_conn = ScannerConnection.promote(conn)
-                            scanner_conn.first_connection_setup(msg)
-                            self.scanners.append(scanner_conn)
-                            logger.info(
-                                f"Scanner announced: {scanner_conn.name!r} with interfaces {scanner_conn.interfaces}"
-                            )
-                            scanner_conn.send_msg(
-                                {
-                                    "command": "status",
-                                    "status": "accepted",
-                                    "server_api_version": 1,
-                                },
-                                send_synchronous=False,
-                            )
-                            self._broadcast_to_clients(
-                                {
-                                    "command": "available_scanners_changed",
-                                    "scanners": [sc.name for sc in self.scanners],
-                                }
-                            )
-                        case "client":
-                            self.unannounced_connections.remove(conn)
-                            self.clients.append(conn)
-                            logger.info("Client announced")
-                            conn.send_msg(
-                                {
-                                    "command": "status",
-                                    "status": "accepted",
-                                    "server_api_version": 1,
-                                    "scanners": [sc.name for sc in self.scanners],
-                                },
-                                send_synchronous=False,
-                            )
-                        case unknown:
-                            logger.warning(f"Announce with unknown type: {unknown!r}")
-                case unknown:
-                    logger.warning(
-                        f"Unknown command from unannounced connection: {unknown!r}"
-                    )
+        for raw in messages:
+            if raw.get("command") != "announce":
+                logger.warning(f"Unknown command from unannounced connection: {raw.get('command')!r}")
+                conn.send_cmd(StatusResponse(status="rejected", reason=f"Expected announce, got {raw.get('command')!r}"), send_synchronous=False)
+                continue
+            try:
+                msg = AnnounceMessageAdapter.validate_python(raw)
+            except ValidationError:
+                logger.warning(f"Invalid announce message: {raw!r}")
+                conn.send_cmd(StatusResponse(status="rejected", reason="Malformed announce message"), send_synchronous=False)
+                continue
+            if isinstance(msg, ScannerAnnounce):
+                if self._lookup_registered_scanner(msg.name) is not None:
+                    logger.warning(f"Rejected duplicate scanner announce for {msg.name!r}")
+                    conn.send_cmd(StatusResponse(status="rejected", reason=f"A scanner named {msg.name!r} is already registered"), send_synchronous=False)
+                    continue
+                self.unannounced_connections.remove(conn)
+                scanner_conn = ScannerConnection.promote(conn)
+                scanner_conn.first_connection_setup(msg)
+                self.scanners.append(scanner_conn)
+                logger.info(f"Scanner announced: {scanner_conn.name!r} with interfaces {scanner_conn.interfaces}")
+                scanner_conn.send_cmd(StatusResponse(status="accepted", server_api_version=1), send_synchronous=False)
+                self._broadcast_to_clients_cmd(ServerAvailableScannersChanged(scanners=[sc.name for sc in self.scanners]))
+            else:
+                # ClientAnnounce
+                self.unannounced_connections.remove(conn)
+                self.clients.append(conn)
+                logger.info("Client announced")
+                conn.send_cmd(StatusResponse(status="accepted", server_api_version=1, scanners=[sc.name for sc in self.scanners]), send_synchronous=False)
 
     def _handle_client_msgs(self, conn: MsgSocket, messages: list[dict]):
-        for msg in messages:
-            command = msg.get("command")
-            logger.debug(f"Client command: {command!r}")
+        for raw in messages:
+            logger.debug(f"Client command: {raw.get('command')!r}")
+            try:
+                msg = ClientMessageAdapter.validate_python(raw)
+            except ValidationError:
+                logger.warning(f"Unknown/invalid command from client: {raw.get('command')!r}")
+                conn.send_cmd(StatusResponse(status="rejected", reason=f"Unknown or malformed command: {raw.get('command')!r}"), send_synchronous=False)
+                continue
 
-            match command:
-                case "get_builtin_scanners":
-                    conn.send_msg(
+            match msg:
+                case ClientGetBuiltinScanners():
+                    conn.send_cmd(StatusResponse(status="accepted", scanners=list(self._builtin_scanners.keys())), send_synchronous=False)
+
+                case ClientGetRegisteredScanners():
+                    conn.send_cmd(StatusResponse(status="accepted", scanners=[
                         {
-                            "command": "status",
-                            "status": "accepted",
-                            "scanners": list(self._builtin_scanners.keys()),
-                        },
-                        send_synchronous=False,
-                    )
+                            "name": sc.name,
+                            "available_interfaces": sc.interfaces,
+                            "active_interfaces": sc.active_interfaces,
+                            "parameters": sc.parameters,
+                        }
+                        for sc in self.scanners
+                    ]), send_synchronous=False)
 
-                case "get_registered_scanners":
-                    conn.send_msg(
-                        {
-                            "command": "status",
-                            "status": "accepted",
-                            "scanners": [
-                                {
-                                    "name": sc.name,
-                                    "available_interfaces": sc.interfaces,
-                                    "active_interfaces": sc.active_interfaces,
-                                    "parameters": sc.parameters,
-                                }
-                                for sc in self.scanners
-                            ],
-                        },
-                        send_synchronous=False,
-                    )
-
-                case "get_registered_scanner":
-                    sc = self._lookup_registered_scanner(msg.get("scanner", ""))
+                case ClientGetRegisteredScanner():
+                    sc = self._lookup_registered_scanner(msg.scanner)
                     if sc is None:
-                        conn.send_msg(
-                            {
-                                "command": "status",
-                                "status": "rejected",
-                                "reason": f"Scanner {msg.get('scanner')!r} is not registered",
-                            },
-                            send_synchronous=False,
-                        )
+                        conn.send_cmd(StatusResponse(status="rejected", reason=f"Scanner {msg.scanner!r} is not registered"), send_synchronous=False)
                     else:
-                        conn.send_msg(
-                            {
-                                "command": "status",
-                                "status": "accepted",
-                                "name": sc.name,
-                                "available_interfaces": sc.interfaces,
-                                "active_interfaces": sc.active_interfaces,
-                                "parameters": sc.parameters,
-                            },
-                            send_synchronous=False,
-                        )
+                        conn.send_cmd(StatusResponse(
+                            status="accepted",
+                            name=sc.name,
+                            available_interfaces=sc.interfaces,
+                            active_interfaces=sc.active_interfaces,
+                            parameters=sc.parameters,
+                        ), send_synchronous=False)
 
-                case "get_scanner_available_interfaces":
-                    sc = self._lookup_registered_scanner(msg.get("scanner", ""))
+                case ClientGetScannerAvailableInterfaces():
+                    sc = self._lookup_registered_scanner(msg.scanner)
                     if sc is None:
-                        conn.send_msg(
-                            {
-                                "command": "status",
-                                "status": "rejected",
-                                "reason": f"Scanner {msg.get('scanner')!r} is not registered",
-                            },
-                            send_synchronous=False,
-                        )
+                        conn.send_cmd(StatusResponse(status="rejected", reason=f"Scanner {msg.scanner!r} is not registered"), send_synchronous=False)
                     else:
-                        conn.send_msg(
-                            {
-                                "command": "status",
-                                "status": "accepted",
-                                "interfaces": sc.interfaces,
-                            },
-                            send_synchronous=False,
-                        )
+                        conn.send_cmd(StatusResponse(status="accepted", interfaces=sc.interfaces), send_synchronous=False)
 
-                case "get_scanner_active_interfaces":
-                    sc = self._lookup_registered_scanner(msg.get("scanner", ""))
+                case ClientGetScannerActiveInterfaces():
+                    sc = self._lookup_registered_scanner(msg.scanner)
                     if sc is None:
-                        conn.send_msg(
-                            {
-                                "command": "status",
-                                "status": "rejected",
-                                "reason": f"Scanner {msg.get('scanner')!r} is not registered",
-                            },
-                            send_synchronous=False,
-                        )
+                        conn.send_cmd(StatusResponse(status="rejected", reason=f"Scanner {msg.scanner!r} is not registered"), send_synchronous=False)
                     else:
-                        conn.send_msg(
-                            {
-                                "command": "status",
-                                "status": "accepted",
-                                "interfaces": sc.active_interfaces,
-                            },
-                            send_synchronous=False,
-                        )
+                        conn.send_cmd(StatusResponse(status="accepted", interfaces=sc.active_interfaces), send_synchronous=False)
 
-                case "get_scanner_parameters":
-                    sc = self._lookup_registered_scanner(msg.get("scanner", ""))
+                case ClientGetScannerParameters():
+                    sc = self._lookup_registered_scanner(msg.scanner)
                     if sc is None:
-                        conn.send_msg(
-                            {
-                                "command": "status",
-                                "status": "rejected",
-                                "reason": f"Scanner {msg.get('scanner')!r} is not registered",
-                            },
-                            send_synchronous=False,
-                        )
+                        conn.send_cmd(StatusResponse(status="rejected", reason=f"Scanner {msg.scanner!r} is not registered"), send_synchronous=False)
                     else:
-                        conn.send_msg(
-                            {
-                                "command": "status",
-                                "status": "accepted",
-                                "parameters": sc.parameters,
-                            },
-                            send_synchronous=False,
-                        )
+                        conn.send_cmd(StatusResponse(status="accepted", parameters=sc.parameters), send_synchronous=False)
 
-                case "set_active_interfaces":
-                    sc = self._lookup_registered_scanner(msg.get("scanner", ""))
+                case ClientSetActiveInterfaces():
+                    sc = self._lookup_registered_scanner(msg.scanner)
                     if sc is None:
-                        conn.send_msg(
-                            {
-                                "command": "status",
-                                "status": "rejected",
-                                "reason": f"Scanner {msg.get('scanner')!r} is not registered",
-                            },
-                            send_synchronous=False,
-                        )
+                        conn.send_cmd(StatusResponse(status="rejected", reason=f"Scanner {msg.scanner!r} is not registered"), send_synchronous=False)
                         continue
-                    requested = msg.get("interfaces", [])
-                    unknown = [
-                        iface for iface in requested if iface not in sc.interfaces
-                    ]
+                    unknown = [iface for iface in msg.interfaces if iface not in sc.interfaces]
                     if unknown:
-                        conn.send_msg(
-                            {
-                                "command": "status",
-                                "status": "rejected",
-                                "reason": f"Interfaces not reported as available by scanner: {unknown}",
-                                "interfaces": unknown,
-                            },
-                            send_synchronous=False,
-                        )
+                        conn.send_cmd(StatusResponse(
+                            status="rejected",
+                            reason=f"Interfaces not reported as available by scanner: {unknown}",
+                            interfaces=unknown,
+                        ), send_synchronous=False)
                         continue
-                    conn.send_msg(
-                        {"command": "status", "status": "accepted"},
-                        send_synchronous=False,
-                    )
-                    sc.send_msg(
-                        {"command": "set_active_interfaces", "interfaces": requested},
-                        send_synchronous=False,
-                    )
+                    conn.send_cmd(StatusResponse(status="accepted"), send_synchronous=False)
+                    sc.send_cmd(ServerSetActiveInterfaces(interfaces=msg.interfaces), send_synchronous=False)
 
-                case "set_scanner_parameters":
-                    sc = self._lookup_registered_scanner(msg.get("scanner", ""))
+                case ClientSetScannerParameters():
+                    sc = self._lookup_registered_scanner(msg.scanner)
                     if sc is None:
-                        conn.send_msg(
-                            {
-                                "command": "status",
-                                "status": "rejected",
-                                "reason": f"Scanner {msg.get('scanner')!r} is not registered",
-                            },
-                            send_synchronous=False,
-                        )
+                        conn.send_cmd(StatusResponse(status="rejected", reason=f"Scanner {msg.scanner!r} is not registered"), send_synchronous=False)
                         continue
-                    params = msg.get("parameters", [])
-                    unknown = [
-                        p["name"] for p in params if p.get("name") not in sc.parameters
-                    ]
+                    unknown = [p.name for p in msg.parameters if p.name not in sc.parameters]
                     if unknown:
-                        conn.send_msg(
-                            {
-                                "command": "status",
-                                "status": "rejected",
-                                "reason": f"Unknown parameter names: {unknown}",
-                                "parameters": unknown,
-                            },
-                            send_synchronous=False,
-                        )
+                        conn.send_cmd(StatusResponse(
+                            status="rejected",
+                            reason=f"Unknown parameter names: {unknown}",
+                            parameters=unknown,
+                        ), send_synchronous=False)
                         continue
-                    conn.send_msg(
-                        {"command": "status", "status": "accepted"},
-                        send_synchronous=False,
-                    )
-                    sc.send_msg(
-                        {"command": "set_scanner_parameters", "parameters": params},
-                        send_synchronous=False,
-                    )
+                    conn.send_cmd(StatusResponse(status="accepted"), send_synchronous=False)
+                    sc.send_cmd(ServerSetScannerParameters(parameters=msg.parameters), send_synchronous=False)
 
-                case "stop_scanner":
-                    sc = self._lookup_registered_scanner(msg.get("scanner", ""))
+                case ClientStopScanner():
+                    sc = self._lookup_registered_scanner(msg.scanner)
                     if sc is None:
-                        conn.send_msg(
-                            {
-                                "command": "status",
-                                "status": "rejected",
-                                "reason": f"Scanner {msg.get('scanner')!r} is not registered",
-                            },
-                            send_synchronous=False,
-                        )
+                        conn.send_cmd(StatusResponse(status="rejected", reason=f"Scanner {msg.scanner!r} is not registered"), send_synchronous=False)
                         continue
-                    conn.send_msg(
-                        {"command": "status", "status": "accepted"},
-                        send_synchronous=False,
-                    )
-                    sc.send_msg({"command": "stop_scanner"}, send_synchronous=False)
+                    conn.send_cmd(StatusResponse(status="accepted"), send_synchronous=False)
+                    sc.send_cmd(ServerStopScanner(), send_synchronous=False)
 
-                case "clear_cache":
-                    scanner_names = msg.get("scanners", [])
-                    unknown = [
-                        name
-                        for name in scanner_names
-                        if self._lookup_registered_scanner(name) is None
-                    ]
+                case ClientClearCache():
+                    unknown = [name for name in msg.scanners if self._lookup_registered_scanner(name) is None]
                     if unknown:
-                        conn.send_msg(
-                            {
-                                "command": "status",
-                                "status": "rejected",
-                                "reason": f"Scanners not registered: {unknown}",
-                                "scanners": unknown,
-                            },
-                            send_synchronous=False,
-                        )
+                        conn.send_cmd(StatusResponse(
+                            status="rejected",
+                            reason=f"Scanners not registered: {unknown}",
+                            scanners=unknown,
+                        ), send_synchronous=False)
                         continue
-                    conn.send_msg(
-                        {"command": "status", "status": "accepted"},
-                        send_synchronous=False,
-                    )
-                    for name in scanner_names:
+                    conn.send_cmd(StatusResponse(status="accepted"), send_synchronous=False)
+                    for name in msg.scanners:
                         sc = self._lookup_registered_scanner(name)
                         assert sc is not None
                         if sc.results:
                             keys = list(sc.results.keys())
                             sc.results.clear()
-                            self._broadcast_to_clients({
-                                "command": "scan_results_remove",
-                                "scanner": name,
-                                "keys": keys,
-                            })
-                        sc.send_msg({"command": "clear_cache"}, send_synchronous=False)
+                            self._broadcast_to_clients_cmd(ServerResultsRemove(scanner=name, keys=keys))
+                        sc.send_cmd(ServerClearCache(), send_synchronous=False)
 
-                case "get_results":
-                    sc = self._lookup_registered_scanner(msg.get("scanner", ""))
+                case ClientGetResults():
+                    sc = self._lookup_registered_scanner(msg.scanner)
                     if sc is None:
-                        conn.send_msg({
-                            "command": "status",
-                            "status": "rejected",
-                            "reason": f"Scanner {msg.get('scanner')!r} is not registered",
-                        }, send_synchronous=False)
+                        conn.send_cmd(StatusResponse(status="rejected", reason=f"Scanner {msg.scanner!r} is not registered"), send_synchronous=False)
                     else:
-                        conn.send_msg({
-                            "command": "status",
-                            "status": "accepted",
-                            "results": [{"key": k, "result": v} for k, v in sc.results.items()],
-                        }, send_synchronous=False)
+                        conn.send_cmd(StatusResponse(
+                            status="accepted",
+                            results=[{"key": k, "result": v} for k, v in sc.results.items()],
+                        ), send_synchronous=False)
 
-                case "get_result":
-                    sc = self._lookup_registered_scanner(msg.get("scanner", ""))
+                case ClientGetResult():
+                    sc = self._lookup_registered_scanner(msg.scanner)
                     if sc is None:
-                        conn.send_msg({
-                            "command": "status",
-                            "status": "rejected",
-                            "reason": f"Scanner {msg.get('scanner')!r} is not registered",
-                        }, send_synchronous=False)
+                        conn.send_cmd(StatusResponse(status="rejected", reason=f"Scanner {msg.scanner!r} is not registered"), send_synchronous=False)
                     else:
-                        key = msg.get("key", "")
-                        result = sc.results.get(key)
+                        result = sc.results.get(msg.key)
                         if result is None:
-                            conn.send_msg({
-                                "command": "status",
-                                "status": "rejected",
-                                "reason": f"Key {key!r} not found in scanner {sc.name!r}",
-                            }, send_synchronous=False)
+                            conn.send_cmd(StatusResponse(status="rejected", reason=f"Key {msg.key!r} not found in scanner {sc.name!r}"), send_synchronous=False)
                         else:
-                            conn.send_msg({
-                                "command": "status",
-                                "status": "accepted",
-                                "key": key,
-                                "result": result,
-                            }, send_synchronous=False)
+                            conn.send_cmd(StatusResponse(status="accepted", key=msg.key, result=result), send_synchronous=False)
 
-                case "start_builtin_scanner":
-                    name = msg.get("scanner", "")
-                    if name not in self._builtin_scanners:
-                        conn.send_msg(
-                            {
-                                "command": "status",
-                                "status": "rejected",
-                                "reason": f"{name!r} is not a known built-in scanner",
-                            },
-                            send_synchronous=False,
-                        )
+                case ClientStartBuiltinScanner():
+                    if msg.scanner not in self._builtin_scanners:
+                        conn.send_cmd(StatusResponse(status="rejected", reason=f"{msg.scanner!r} is not a known built-in scanner"), send_synchronous=False)
                         continue
-                    module_path = self._builtin_scanners[name]
+                    module_path = self._builtin_scanners[msg.scanner]
                     args = [sys.executable, "-m", module_path] + self._connection_args
                     subprocess.Popen(args, start_new_session=True)
-                    conn.send_msg(
-                        {"command": "status", "status": "accepted"},
-                        send_synchronous=False,
-                    )
-
-                case unknown:
-                    logger.warning(f"Unknown command from client: {unknown!r}")
+                    conn.send_cmd(StatusResponse(status="accepted"), send_synchronous=False)
 
     def _handle_scanner_msgs(self, scanner: ScannerConnection, messages: list[dict]):
-        for msg in messages:
-            command = msg.get("command")
-            logger.debug(f"Scanner {scanner.name!r} command: {command!r}")
+        for raw in messages:
+            logger.debug(f"Scanner {scanner.name!r} command: {raw.get('command')!r}")
+            try:
+                msg = ScannerMessageAdapter.validate_python(raw)
+            except ValidationError:
+                logger.warning(f"Unknown/invalid command from scanner {scanner.name!r}: {raw.get('command')!r}")
+                scanner.send_cmd(StatusResponse(status="rejected", reason=f"Unknown or malformed command: {raw.get('command')!r}"), send_synchronous=False)
+                continue
 
-            match command:
-                case "available_interfaces_changed":
-                    scanner.interfaces = msg.get("interfaces", [])
-                    scanner.send_msg(
-                        {"command": "status", "status": "accepted"},
-                        send_synchronous=False,
-                    )
-                    self._broadcast_to_clients(
-                        {
-                            "command": "available_interfaces_changed",
-                            "scanner": scanner.name,
-                            "interfaces": scanner.interfaces,
-                        }
-                    )
+            match msg:
+                case ScannerAvailableInterfacesChanged():
+                    scanner.interfaces = msg.interfaces
+                    scanner.send_cmd(StatusResponse(status="accepted"), send_synchronous=False)
+                    self._broadcast_to_clients_cmd(ServerAvailableInterfacesChanged(scanner=scanner.name, interfaces=scanner.interfaces))
 
-                case "active_interfaces_changed":
-                    scanner.active_interfaces = msg.get("interfaces", [])
-                    scanner.send_msg(
-                        {"command": "status", "status": "accepted"},
-                        send_synchronous=False,
-                    )
-                    self._broadcast_to_clients(
-                        {
-                            "command": "active_interfaces_changed",
-                            "scanner": scanner.name,
-                            "interfaces": scanner.active_interfaces,
-                        }
-                    )
+                case ScannerActiveInterfacesChanged():
+                    scanner.active_interfaces = msg.interfaces
+                    scanner.send_cmd(StatusResponse(status="accepted"), send_synchronous=False)
+                    self._broadcast_to_clients_cmd(ServerActiveInterfacesChanged(scanner=scanner.name, interfaces=scanner.active_interfaces))
 
-                case "parameters_changed":
-                    # Merge the list[dict] of name/value pairs into the flat parameters cache.
-                    for entry in msg.get("parameters", []):
-                        scanner.parameters[entry["name"]] = entry["value"]
-                    scanner.send_msg(
-                        {"command": "status", "status": "accepted"},
-                        send_synchronous=False,
-                    )
-                    self._broadcast_to_clients({
-                        "command": "parameters_changed",
-                        "scanner": scanner.name,
-                        "parameters": msg.get("parameters", []),
-                    })
+                case ScannerParametersChanged():
+                    for entry in msg.parameters:
+                        scanner.parameters[entry.name] = entry.value
+                    scanner.send_cmd(StatusResponse(status="accepted"), send_synchronous=False)
+                    self._broadcast_to_clients_cmd(ServerParametersChanged(scanner=scanner.name, parameters=msg.parameters))
 
-                case "scan_results_update":
-                    valid_results = []
-                    for item in msg.get("results", []):
-                        key = item.get("key")
-                        result = item.get("result")
-                        if key is not None and result is not None:
-                            scanner.results[key] = result
-                            valid_results.append(item)
-                    scanner.send_msg(
-                        {"command": "status", "status": "accepted"},
-                        send_synchronous=False,
-                    )
-                    if valid_results:
-                        self._broadcast_to_clients({
-                            "command": "scan_results_update",
-                            "scanner": scanner.name,
-                            "results": valid_results,
-                        })
+                case ScannerResultsUpdate():
+                    for item in msg.results:
+                        scanner.results[item.key] = item.result
+                    scanner.send_cmd(StatusResponse(status="accepted"), send_synchronous=False)
+                    if msg.results:
+                        self._broadcast_to_clients_cmd(ServerResultsUpdate(scanner=scanner.name, results=msg.results))
 
-                case "scan_results_remove":
-                    removed_keys = [k for k in msg.get("keys", []) if k in scanner.results]
+                case ScannerResultsRemove():
+                    removed_keys = [k for k in msg.keys if k in scanner.results]
                     for key in removed_keys:
                         del scanner.results[key]
-                    scanner.send_msg(
-                        {"command": "status", "status": "accepted"},
-                        send_synchronous=False,
-                    )
-                    self._broadcast_to_clients({
-                        "command": "scan_results_remove",
-                        "scanner": scanner.name,
-                        "keys": removed_keys,
-                    })
+                    scanner.send_cmd(StatusResponse(status="accepted"), send_synchronous=False)
+                    self._broadcast_to_clients_cmd(ServerResultsRemove(scanner=scanner.name, keys=removed_keys))
 
-                case unknown:
-                    logger.warning(
-                        f"Unknown command from scanner {scanner.name!r}: {unknown!r}"
-                    )
+                case ScannerAnnounce():
+                    logger.warning(f"Received duplicate announce from already-registered scanner {scanner.name!r}")
 
 
 if __name__ == "__main__":
