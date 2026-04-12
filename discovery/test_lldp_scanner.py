@@ -265,52 +265,52 @@ class TestHandleLldpPacket:
         self._feed(scanner_unit, _build_lldp_frame())
         with patch("time.time", return_value=_NOW):
             scanner_unit._handle_lldp_packet()
-        scanner_unit.server.send_msg.assert_called_once()
-        msg = scanner_unit.server.send_msg.call_args[0][0]
-        assert msg["command"] == "scan_results_update"
-        assert msg["results"][0]["key"] == f"{_IFNAME}/{_CHASSIS_MAC_STR}"
+        scanner_unit.server.send_cmd.assert_called_once()
+        model = scanner_unit.server.send_cmd.call_args[0][0]
+        assert model.command == "scan_results_update"
+        assert model.results[0].key == f"{_IFNAME}/{_CHASSIS_MAC_STR}"
 
     def test_ttl_refresh_does_not_send_update(self, scanner_unit):
         frame = _build_lldp_frame()
         with patch("time.time", return_value=_NOW):
             self._feed(scanner_unit, frame)
             scanner_unit._handle_lldp_packet()
-            scanner_unit.server.send_msg.reset_mock()
+            scanner_unit.server.send_cmd.reset_mock()
             self._feed(scanner_unit, frame)
             scanner_unit._handle_lldp_packet()
-        scanner_unit.server.send_msg.assert_not_called()
+        scanner_unit.server.send_cmd.assert_not_called()
 
     def test_content_change_sends_update(self, scanner_unit):
         with patch("time.time", return_value=_NOW):
             self._feed(scanner_unit, _build_lldp_frame(system_name=b"device-v1"))
             scanner_unit._handle_lldp_packet()
-            scanner_unit.server.send_msg.reset_mock()
+            scanner_unit.server.send_cmd.reset_mock()
             self._feed(scanner_unit, _build_lldp_frame(system_name=b"device-v2"))
             scanner_unit._handle_lldp_packet()
-        scanner_unit.server.send_msg.assert_called_once()
+        scanner_unit.server.send_cmd.assert_called_once()
 
     def test_shutdown_ttl0_removes_from_cache(self, scanner_unit):
         with patch("time.time", return_value=_NOW):
             self._feed(scanner_unit, _build_lldp_frame())
             scanner_unit._handle_lldp_packet()
-            scanner_unit.server.send_msg.reset_mock()
+            scanner_unit.server.send_cmd.reset_mock()
             self._feed(scanner_unit, _build_shutdown_frame())
             scanner_unit._handle_lldp_packet()
         assert f"{_IFNAME}/{_CHASSIS_MAC_STR}" not in scanner_unit._cache
-        msg = scanner_unit.server.send_msg.call_args[0][0]
-        assert msg["command"] == "scan_results_remove"
-        assert f"{_IFNAME}/{_CHASSIS_MAC_STR}" in msg["keys"]
+        model = scanner_unit.server.send_cmd.call_args[0][0]
+        assert model.command == "scan_results_remove"
+        assert f"{_IFNAME}/{_CHASSIS_MAC_STR}" in model.keys
 
     def test_shutdown_unseen_neighbor_silent(self, scanner_unit):
         self._feed(scanner_unit, _build_shutdown_frame())
         scanner_unit._handle_lldp_packet()
-        scanner_unit.server.send_msg.assert_not_called()
+        scanner_unit.server.send_cmd.assert_not_called()
 
     def test_inactive_interface_ignored(self, scanner_unit):
         self._feed(scanner_unit, _build_lldp_frame(), ifname="wlan0")
         scanner_unit._handle_lldp_packet()
         assert scanner_unit._cache == {}
-        scanner_unit.server.send_msg.assert_not_called()
+        scanner_unit.server.send_cmd.assert_not_called()
 
     def test_malformed_frame_does_not_crash(self, scanner_unit):
         scanner_unit._lldp_socket.recvfrom.return_value = (b"\xff\xff\xff garbage", _RECVFROM_ADDR)
@@ -388,18 +388,18 @@ class TestExpireRecords:
             chassis_id="gone", ttl=5, received_at=_NOW - 10
         )
         scanner_unit._expire_records(_NOW)
-        msg = scanner_unit.server.send_msg.call_args[0][0]
-        assert msg["command"] == "scan_results_remove"
-        assert "eth0/gone" in msg["keys"]
+        model = scanner_unit.server.send_cmd.call_args[0][0]
+        assert model.command == "scan_results_remove"
+        assert "eth0/gone" in model.keys
 
     def test_no_message_when_nothing_expired(self, scanner_unit):
         scanner_unit._cache["eth0/live"] = _make_neighbor(ttl=120, received_at=_NOW)
         scanner_unit._expire_records(_NOW + 60)
-        scanner_unit.server.send_msg.assert_not_called()
+        scanner_unit.server.send_cmd.assert_not_called()
 
     def test_empty_cache_no_message(self, scanner_unit):
         scanner_unit._expire_records(_NOW)
-        scanner_unit.server.send_msg.assert_not_called()
+        scanner_unit.server.send_cmd.assert_not_called()
 
     def test_boundary_not_yet_expired(self, scanner_unit):
         # received_at=T, ttl=10: expires when now > T+10, not at T+10 exactly
@@ -441,15 +441,15 @@ class TestLeaveInterface:
         scanner_unit._cache[key] = _make_neighbor(interface="eth0")
         with patch("socket.if_nametoindex", return_value=1):
             scanner_unit._leave_interface("eth0")
-        msg = scanner_unit.server.send_msg.call_args[0][0]
-        assert msg["command"] == "scan_results_remove"
-        assert key in msg["keys"]
+        model = scanner_unit.server.send_cmd.call_args[0][0]
+        assert model.command == "scan_results_remove"
+        assert key in model.keys
 
     def test_empty_interface_no_message(self, scanner_unit):
         scanner_unit._cache["wlan0/other"] = _make_neighbor(interface="wlan0", chassis_id="other")
         with patch("socket.if_nametoindex", return_value=1):
             scanner_unit._leave_interface("eth0")
-        scanner_unit.server.send_msg.assert_not_called()
+        scanner_unit.server.send_cmd.assert_not_called()
 
     def test_interface_removed_from_active_set(self, scanner_unit):
         scanner_unit._active_interfaces.add("eth0")
@@ -472,20 +472,20 @@ class TestClearCache:
     def test_scan_results_remove_sent(self, scanner_unit):
         scanner_unit._cache["eth0/a"] = _make_neighbor(chassis_id="a")
         scanner_unit._clear_cache()
-        msg = scanner_unit.server.send_msg.call_args[0][0]
-        assert msg["command"] == "scan_results_remove"
-        assert "eth0/a" in msg["keys"]
+        model = scanner_unit.server.send_cmd.call_args[0][0]
+        assert model.command == "scan_results_remove"
+        assert "eth0/a" in model.keys
 
     def test_all_keys_included(self, scanner_unit):
         scanner_unit._cache["eth0/a"] = _make_neighbor(chassis_id="a")
         scanner_unit._cache["eth0/b"] = _make_neighbor(chassis_id="b")
         scanner_unit._clear_cache()
-        msg = scanner_unit.server.send_msg.call_args[0][0]
-        assert set(msg["keys"]) == {"eth0/a", "eth0/b"}
+        model = scanner_unit.server.send_cmd.call_args[0][0]
+        assert set(model.keys) == {"eth0/a", "eth0/b"}
 
     def test_empty_cache_no_message(self, scanner_unit):
         scanner_unit._clear_cache()
-        scanner_unit.server.send_msg.assert_not_called()
+        scanner_unit.server.send_cmd.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

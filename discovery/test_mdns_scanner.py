@@ -457,20 +457,20 @@ class TestClearCache:
     def test_scan_results_remove_sent(self, scanner_unit):
         scanner_unit._record_cache = {_a()}
         scanner_unit._clear_cache()
-        scanner_unit.server.send_msg.assert_called_once()
-        msg = scanner_unit.server.send_msg.call_args[0][0]
-        assert msg["command"] == "scan_results_remove"
-        assert "eth0/mydevice.local." in msg["keys"]
+        scanner_unit.server.send_cmd.assert_called_once()
+        model = scanner_unit.server.send_cmd.call_args[0][0]
+        assert model.command == "scan_results_remove"
+        assert "eth0/mydevice.local." in model.keys
 
     def test_keys_include_srv_targets(self, scanner_unit):
         scanner_unit._record_cache = {_srv(target="mydevice.local.")}
         scanner_unit._clear_cache()
-        msg = scanner_unit.server.send_msg.call_args[0][0]
-        assert "eth0/mydevice.local." in msg["keys"]
+        model = scanner_unit.server.send_cmd.call_args[0][0]
+        assert "eth0/mydevice.local." in model.keys
 
     def test_empty_cache_no_message(self, scanner_unit):
         scanner_unit._clear_cache()
-        scanner_unit.server.send_msg.assert_not_called()
+        scanner_unit.server.send_cmd.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -500,16 +500,16 @@ class TestLeaveInterface:
         scanner_unit._record_cache = {_a(interface="eth0")}
         with patch("socket.if_nametoindex", return_value=1):
             scanner_unit._leave_interface("eth0")
-        scanner_unit.server.send_msg.assert_called_once()
-        msg = scanner_unit.server.send_msg.call_args[0][0]
-        assert msg["command"] == "scan_results_remove"
-        assert "eth0/mydevice.local." in msg["keys"]
+        scanner_unit.server.send_cmd.assert_called_once()
+        model = scanner_unit.server.send_cmd.call_args[0][0]
+        assert model.command == "scan_results_remove"
+        assert "eth0/mydevice.local." in model.keys
 
     def test_empty_interface_no_message(self, scanner_unit):
         scanner_unit._record_cache = {_a(interface="wlan0", rrname="other.local.")}
         with patch("socket.if_nametoindex", return_value=1):
             scanner_unit._leave_interface("eth0")
-        scanner_unit.server.send_msg.assert_not_called()
+        scanner_unit.server.send_cmd.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
