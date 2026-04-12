@@ -16,8 +16,22 @@ import time
 import uuid
 from select import select
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
+from discovery.commands import (
+    ParameterUpdate,
+    ScannerActiveInterfacesChanged,
+    ScannerAnnounce,
+    ScannerAvailableInterfacesChanged,
+    ScannerParametersChanged,
+    ScannerResultsUpdate,
+    ScanResultItem,
+    ServerToScannerMessageAdapter,
+    ServerClearCache,
+    ServerSetActiveInterfaces,
+    ServerSetScannerParameters,
+    ServerStopScanner,
+)
 from discovery.scanners.base_scanner import BaseScanner
 from discovery.scanners.mdns import MDNSHostData, MDNSServiceData
 
@@ -28,8 +42,8 @@ class ScannerResult(BaseModel):
     tags: list[str] = []
 
 
-def _send(sock, msg: dict) -> None:
-    sock.send_msg(msg)
+def _send(sock, model) -> None:
+    sock.send_cmd(model)
 
 
 def _recv_one(sock, timeout: float = 5.0) -> dict:
@@ -161,29 +175,16 @@ class TestScanner(BaseScanner):
             "cache_clear_count": cache_clear_count,
         }
 
-        _send(
-            self.server,
-            {
-                "command": "announce",
-                "type": "scanner",
-                "name": "test",
-                "interfaces": available,
-                "parameters": initial_parameters,
-            },
-        )
+        _send(self.server, ScannerAnnounce(name="test", interfaces=available, parameters=initial_parameters))
         self.wait_for_registration()
 
         if parsed.emit_available_on_start:
-            _send(
-                self.server,
-                {"command": "available_interfaces_changed", "interfaces": available},
-            )
+            _send(self.server, ScannerAvailableInterfacesChanged(interfaces=available))
             _recv_one(self.server)
 
-        _send(self.server, {
-            "command": "scan_results_update",
-            "results": [{"key": k, "result": v.model_dump()} for k, v in fake_results.items()],
-        })
+        _send(self.server, ScannerResultsUpdate(results=[
+            ScanResultItem(key=k, result=v.model_dump()) for k, v in fake_results.items()
+        ]))
         _recv_one(self.server)
 
         self._continue_running = True
@@ -199,104 +200,68 @@ class TestScanner(BaseScanner):
             except ConnectionError:
                 logger.info("Server connection closed, shutting down")
                 break
-            for msg in msgs:
+            for raw in msgs:
+                try:
+                    cmd = ServerToScannerMessageAdapter.validate_python(raw)
+                except ValidationError:
+                    logger.warning(f"Unknown/invalid command from server: {raw.get('command')!r}")
+                    continue
 
-                command = msg.get("command")
-
-                match command:
-                    case "set_scanner_parameters":
-                        changed_params = []
+                match cmd:
+                    case ServerSetScannerParameters():
+                        changed_params: list[ParameterUpdate] = []
                         emit_available = False
                         emit_active = False
 
-                        for entry in msg.get("parameters", []):
-                            name = entry.get("name")
-                            value = entry.get("value")
-                            initial_parameters[name] = value
+                        for entry in cmd.parameters:
+                            initial_parameters[entry.name] = entry.value
                             changed_params.append(entry)
 
-                            if name == "available_interfaces":
-                                available = [i for i in value.split(",") if i]
+                            if entry.name == "available_interfaces":
+                                available = [i for i in entry.value.split(",") if i]
                                 emit_available = True
-                            elif name == "active_interfaces":
-                                active = [i for i in value.split(",") if i]
+                            elif entry.name == "active_interfaces":
+                                active = [i for i in entry.value.split(",") if i]
                                 emit_active = True
-                            elif name == "interval":
-                                parsed.interval = float(value)
-                            elif name == "stop_delay":
-                                parsed.stop_delay = float(value)
+                            elif entry.name == "interval":
+                                parsed.interval = float(entry.value)
+                            elif entry.name == "stop_delay":
+                                parsed.stop_delay = float(entry.value)
 
                         if emit_available:
-                            _send(
-                                self.server,
-                                {
-                                    "command": "available_interfaces_changed",
-                                    "interfaces": available,
-                                },
-                            )
+                            _send(self.server, ScannerAvailableInterfacesChanged(interfaces=available))
                             _recv_one(self.server)
 
                         if emit_active:
-                            _send(
-                                self.server,
-                                {
-                                    "command": "active_interfaces_changed",
-                                    "interfaces": active,
-                                },
-                            )
+                            _send(self.server, ScannerActiveInterfacesChanged(interfaces=active))
                             _recv_one(self.server)
 
-                        _send(
-                            self.server,
-                            {
-                                "command": "parameters_changed",
-                                "parameters": changed_params,
-                            },
-                        )
+                        _send(self.server, ScannerParametersChanged(parameters=changed_params))
                         _recv_one(self.server)
 
-                    case "set_active_interfaces":
-                        active = msg.get("interfaces", [])
+                    case ServerSetActiveInterfaces():
+                        active = cmd.interfaces
                         initial_parameters["active_interfaces"] = ",".join(active)
-                        _send(
-                            self.server,
-                            {
-                                "command": "active_interfaces_changed",
-                                "interfaces": active,
-                            },
-                        )
+                        _send(self.server, ScannerActiveInterfacesChanged(interfaces=active))
                         _recv_one(self.server)
 
-                    case "clear_cache":
+                    case ServerClearCache():
                         cache_clear_count += 1
                         initial_parameters["cache_clear_count"] = cache_clear_count
-                        _send(
-                            self.server,
-                            {
-                                "command": "parameters_changed",
-                                "parameters": [
-                                    {
-                                        "name": "cache_clear_count",
-                                        "value": cache_clear_count,
-                                    }
-                                ],
-                            },
-                        )
+                        _send(self.server, ScannerParametersChanged(parameters=[
+                            ParameterUpdate(name="cache_clear_count", value=cache_clear_count)
+                        ]))
                         _recv_one(self.server)
-                        _send(self.server, {
-                            "command": "scan_results_update",
-                            "results": [{"key": k, "result": v.model_dump()} for k, v in fake_results.items()],
-                        })
+                        _send(self.server, ScannerResultsUpdate(results=[
+                            ScanResultItem(key=k, result=v.model_dump()) for k, v in fake_results.items()
+                        ]))
                         _recv_one(self.server)
 
-                    case "stop_scanner":
+                    case ServerStopScanner():
                         if parsed.stop_delay > 0:
                             time.sleep(parsed.stop_delay)
                         self._continue_running = False
                         break
-
-                    case unknown:
-                        logger.warning(f"Unknown command from server: {unknown!r}")
 
     def stop(self) -> None:
         self._continue_running = False
