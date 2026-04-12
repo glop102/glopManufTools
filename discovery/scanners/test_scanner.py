@@ -42,10 +42,6 @@ class ScannerResult(BaseModel):
     tags: list[str] = []
 
 
-def _send(sock, model) -> None:
-    sock.send_cmd(model)
-
-
 def _recv_one(sock, timeout: float = 5.0) -> dict:
     ready, _, _ = select([sock], [], [], timeout)
     if not ready:
@@ -175,14 +171,14 @@ class TestScanner(BaseScanner):
             "cache_clear_count": cache_clear_count,
         }
 
-        _send(self.server, ScannerAnnounce(name="test", interfaces=available, parameters=initial_parameters))
+        self.server.send_cmd(ScannerAnnounce(name="test", interfaces=available, parameters=initial_parameters))
         self.wait_for_registration()
 
         if parsed.emit_available_on_start:
-            _send(self.server, ScannerAvailableInterfacesChanged(interfaces=available))
+            self.server.send_cmd(ScannerAvailableInterfacesChanged(interfaces=available))
             _recv_one(self.server)
 
-        _send(self.server, ScannerResultsUpdate(results=[
+        self.server.send_cmd(ScannerResultsUpdate(results=[
             ScanResultItem(key=k, result=v.model_dump()) for k, v in fake_results.items()
         ]))
         _recv_one(self.server)
@@ -229,30 +225,30 @@ class TestScanner(BaseScanner):
                                 parsed.stop_delay = float(entry.value)
 
                         if emit_available:
-                            _send(self.server, ScannerAvailableInterfacesChanged(interfaces=available))
+                            self.server.send_cmd(ScannerAvailableInterfacesChanged(interfaces=available))
                             _recv_one(self.server)
 
                         if emit_active:
-                            _send(self.server, ScannerActiveInterfacesChanged(interfaces=active))
+                            self.server.send_cmd(ScannerActiveInterfacesChanged(interfaces=active))
                             _recv_one(self.server)
 
-                        _send(self.server, ScannerParametersChanged(parameters=changed_params))
+                        self.server.send_cmd(ScannerParametersChanged(parameters=changed_params))
                         _recv_one(self.server)
 
                     case ServerSetActiveInterfaces():
                         active = cmd.interfaces
                         initial_parameters["active_interfaces"] = ",".join(active)
-                        _send(self.server, ScannerActiveInterfacesChanged(interfaces=active))
+                        self.server.send_cmd(ScannerActiveInterfacesChanged(interfaces=active))
                         _recv_one(self.server)
 
                     case ServerClearCache():
                         cache_clear_count += 1
                         initial_parameters["cache_clear_count"] = cache_clear_count
-                        _send(self.server, ScannerParametersChanged(parameters=[
+                        self.server.send_cmd(ScannerParametersChanged(parameters=[
                             ParameterUpdate(name="cache_clear_count", value=cache_clear_count)
                         ]))
                         _recv_one(self.server)
-                        _send(self.server, ScannerResultsUpdate(results=[
+                        self.server.send_cmd(ScannerResultsUpdate(results=[
                             ScanResultItem(key=k, result=v.model_dump()) for k, v in fake_results.items()
                         ]))
                         _recv_one(self.server)
