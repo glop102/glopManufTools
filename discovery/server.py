@@ -199,12 +199,7 @@ class DiscoveryServer:
                         assert isinstance(s, ScannerConnection)
                         logger.info(f"Disconnecting Scanner {s.name!r} (write error)")
                         self.scanners.remove(s)
-                        self._broadcast_to_clients(
-                            {
-                                "command": "available_scanners_changed",
-                                "scanners": [sc.name for sc in self.scanners],
-                            }
-                        )
+                        self._broadcast_to_clients_cmd(ServerAvailableScannersChanged(scanners=[sc.name for sc in self.scanners]))
 
             for s in ready_to_read:
                 if s == self.socket:
@@ -241,12 +236,7 @@ class DiscoveryServer:
                     except ConnectionError:
                         logger.info(f"    Disconnecting Scanner {s.name!r}")
                         self.scanners.remove(s)
-                        self._broadcast_to_clients(
-                            {
-                                "command": "available_scanners_changed",
-                                "scanners": [sc.name for sc in self.scanners],
-                            }
-                        )
+                        self._broadcast_to_clients_cmd(ServerAvailableScannersChanged(scanners=[sc.name for sc in self.scanners]))
                 else:
                     logger.error(
                         f"Unknown socket returned from select read list {s}",
@@ -258,13 +248,6 @@ class DiscoveryServer:
             if sc.name == name:
                 return sc
         return None
-
-    def _broadcast_to_clients(self, msg: dict) -> None:
-        for client in self.clients:
-            try:
-                client.send_msg(msg, send_synchronous=False)
-            except ConnectionError:
-                logger.info("Client disconnected during broadcast, will be cleaned up by main loop")
 
     def _broadcast_to_clients_cmd(self, model) -> None:
         for client in self.clients:
