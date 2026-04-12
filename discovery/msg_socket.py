@@ -52,8 +52,11 @@ class MsgSocket:
                 raw = self._read_buf[4 : 4 + msg_len]
                 self._read_buf = self._read_buf[4 + msg_len :]
                 try:
-                    messages_found.append(json.loads(raw.decode("utf-8")))
-                except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                    decoded = json.loads(raw.decode("utf-8"))
+                    if not isinstance(decoded, dict):
+                        raise ValueError(f"Expected a JSON object, got {type(decoded).__name__}")
+                    messages_found.append(decoded)
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as e:
                     logger.error(
                         f"Unable to decode buffered message: len({msg_len})", exc_info=e
                     )
