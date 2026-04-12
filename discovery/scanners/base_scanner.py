@@ -9,8 +9,11 @@ from pathlib import Path
 from select import select
 from typing import Optional
 
+from pydantic import ValidationError
+
 from discovery.client import DiscoveryClient
 from discovery._utils import _parse_tcp_socket
+from discovery.commands import StatusResponse
 
 
 class BaseScanner(ABC):
@@ -65,12 +68,13 @@ class BaseScanner(ABC):
                 "Timed out waiting for registered confirmation from server"
             )
         msgs = self.server.read_msgs()
-        registered = msgs[0] if msgs else {}
-        if (
-            registered.get("command") != "status"
-            or registered.get("status") != "accepted"
-        ):
-            raise RuntimeError(f"Expected status accepted, got: {registered!r}")
+        raw = msgs[0] if msgs else {}
+        try:
+            resp = StatusResponse.model_validate(raw)
+        except ValidationError:
+            raise RuntimeError(f"Expected status response, got: {raw!r}")
+        if resp.status != "accepted":
+            raise RuntimeError(f"Expected status accepted, got: {resp!r}")
 
     def connect_to_server(self):
         self.server = DiscoveryClient.connect(
