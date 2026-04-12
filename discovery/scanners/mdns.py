@@ -9,7 +9,24 @@ from discovery.scanners.base_scanner import BaseScanner
 from abc import ABC, abstractmethod
 from typing import Optional, Protocol, TypedDict
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
+
+from discovery.commands import (
+    ScannerActiveInterfacesChanged,
+    ScannerAnnounce,
+    ScannerAvailableInterfacesChanged,
+    ScannerParametersChanged,
+    ScannerResultsRemove,
+    ScannerResultsUpdate,
+    ScanResultItem,
+    ServerClearCache,
+    ServerSetActiveInterfaces,
+    ServerSetScannerParameters,
+    ServerStopScanner,
+    ServerToScannerMessageAdapter,
+    StatusResponse,
+    ParameterUpdate,
+)
 from scapy.layers.dns import DNS, DNSQR, dnstypes
 
 MDNS_ADDR6 = "ff02::fb"
@@ -232,14 +249,11 @@ class MdnsScanner(BaseScanner):
                 "Scanner returned from connect_to_server() without a valid self.server instance"
             )
         self._available_interfaces: set[str] = {name for _, name in socket.if_nameindex()}
-        announce = {
-            "command": "announce",
-            "type": "scanner",
-            "name": "mdns.v1",
-            "parameters": vars(self._params),
-            "interfaces": list(self._available_interfaces),
-        }
-        self.server.send_msg(announce)
+        self.server.send_cmd(ScannerAnnounce(
+            name="mdns.v1",
+            parameters=vars(self._params),
+            interfaces=list(self._available_interfaces),
+        ))
         self.wait_for_registration()
 
         self._mdns_listener = self._create_mdns_listener(self._params.bind_address, self._params.port)
@@ -295,10 +309,7 @@ class MdnsScanner(BaseScanner):
         )
         self._record_cache = {r for r in self._record_cache if r.interface != interface}
         if known_keys:
-            self.server.send_msg({
-                "command": "scan_results_remove",
-                "keys": list(known_keys),
-            })
+            self.server.send_cmd( ScannerResultsRemove(keys=list(known_keys)))
 
     def _check_interfaces(self) -> None:
         """
@@ -324,14 +335,8 @@ class MdnsScanner(BaseScanner):
         self._available_interfaces = current
 
         if active_changed:
-            self.server.send_msg({
-                "command": "active_interfaces_changed",
-                "interfaces": list(self._active_interfaces),
-            })
-        self.server.send_msg({
-            "command": "available_interfaces_changed",
-            "interfaces": list(self._available_interfaces),
-        })
+            self.server.send_cmd( ScannerActiveInterfacesChanged(interfaces=list(self._active_interfaces)))
+        self.server.send_cmd( ScannerAvailableInterfacesChanged(interfaces=list(self._available_interfaces)))
 
     def _send_query(self) -> None:
         """Send PTR queries: one for the top-level meta-domain plus one per known service type."""
@@ -368,21 +373,25 @@ class MdnsScanner(BaseScanner):
             self._keep_running = False
             return
 
-        for msg in msgs:
-            match msg.get("command"):
-                case "set_scanner_parameters":
+        for raw in msgs:
+            try:
+                cmd = ServerToScannerMessageAdapter.validate_python(raw)
+            except ValidationError:
+                logger.warning("Unknown/invalid command from server: %r", raw.get("command"))
+                continue
+
+            match cmd:
+                case ServerSetScannerParameters():
                     changed = []
-                    for entry in msg.get("parameters", []):
-                        name = entry.get("name")
-                        value = entry.get("value")
-                        if not hasattr(self._params, name):
-                            logger.warning("Ignoring unknown parameter %r", name)
+                    for entry in cmd.parameters:
+                        if not hasattr(self._params, entry.name):
+                            logger.warning("Ignoring unknown parameter %r", entry.name)
                             continue
-                        if getattr(self._params, name) == value:
+                        if getattr(self._params, entry.name) == entry.value:
                             continue
-                        setattr(self._params, name, value)
-                        changed.append(name)
-                        logger.debug("Parameter %r changed to %r", name, value)
+                        setattr(self._params, entry.name, entry.value)
+                        changed.append(entry.name)
+                        logger.debug("Parameter %r changed to %r", entry.name, entry.value)
                     if changed:
                         if "port" in changed or "bind_address" in changed or "multicast_group" in changed:
                             self._mdns_listener.close()
@@ -392,16 +401,12 @@ class MdnsScanner(BaseScanner):
                             )
                             for iface in self._active_interfaces:
                                 self._join_interface(iface)
-                        self.server.send_msg({
-                            "command": "parameters_changed",
-                            "parameters": [
-                                {"name": n, "value": getattr(self._params, n)}
-                                for n in changed
-                            ],
-                        })
+                        self.server.send_cmd( ScannerParametersChanged(parameters=[
+                            ParameterUpdate(name=n, value=getattr(self._params, n)) for n in changed
+                        ]))
 
-                case "set_active_interfaces":
-                    requested = set(msg.get("interfaces", []))
+                case ServerSetActiveInterfaces():
+                    requested = set(cmd.interfaces)
                     for iface in requested - self._active_interfaces:
                         try:
                             self._join_interface(iface)
@@ -409,24 +414,18 @@ class MdnsScanner(BaseScanner):
                             logger.warning("Failed to join mDNS group on %s, interface may have disappeared", iface, exc_info=True)
                     for iface in self._active_interfaces - requested:
                         self._leave_interface(iface)
-                    self.server.send_msg({
-                        "command": "active_interfaces_changed",
-                        "interfaces": list(self._active_interfaces),
-                    })
+                    self.server.send_cmd( ScannerActiveInterfacesChanged(interfaces=list(self._active_interfaces)))
 
-                case "clear_cache":
+                case ServerClearCache():
                     logger.debug("clear_cache received")
                     self._clear_cache()
 
-                case "status":
-                    pass  # announce acknowledgement from server
+                case StatusResponse():
+                    pass  # acknowledgement from server
 
-                case "stop_scanner":
+                case ServerStopScanner():
                     logger.info("stop_scanner received, shutting down")
                     self._keep_running = False
-
-                case unknown:
-                    logger.warning("Unknown command from server: %r", unknown)
 
     def _clear_cache(self) -> None:
         """
@@ -442,11 +441,7 @@ class MdnsScanner(BaseScanner):
         self._record_cache.clear()
         logger.info("Cache cleared, removing %d previously reported hosts", len(known_keys))
         if known_keys:
-            self.server.send_msg({
-                "command": "scan_results_remove",
-                "keys": list(known_keys),
-            })
-
+            self.server.send_cmd( ScannerResultsRemove(keys=list(known_keys)))
 
     def _process_rr(self, interface: str, rr: DNSRecord, now: float) -> MDNSResponseRecord | None:
         """
@@ -650,15 +645,11 @@ class MdnsScanner(BaseScanner):
         removals = [h for h in hosts if not h.addresses and not h.services]
 
         if updates:
-            self.server.send_msg({
-                "command": "scan_results_update",
-                "results": [{"key": f"{h.interface}/{h.hostname}", "result": h.model_dump()} for h in updates],
-            })
+            self.server.send_cmd( ScannerResultsUpdate(results=[
+                ScanResultItem(key=f"{h.interface}/{h.hostname}", result=h.model_dump()) for h in updates
+            ]))
         if removals:
-            self.server.send_msg({
-                "command": "scan_results_remove",
-                "keys": [f"{h.interface}/{h.hostname}" for h in removals],
-            })
+            self.server.send_cmd( ScannerResultsRemove(keys=[f"{h.interface}/{h.hostname}" for h in removals]))
 
 
 if __name__ == "__main__":
