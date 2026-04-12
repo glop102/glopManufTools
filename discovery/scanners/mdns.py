@@ -320,11 +320,9 @@ class MdnsScanner(BaseScanner):
         """
         assert self.server is not None
         current = {name for _, name in socket.if_nameindex()}
-        appeared = current - self._available_interfaces
-        disappeared = self._available_interfaces - current
-
-        if not appeared and not disappeared:
+        if current == self._available_interfaces:
             return
+        disappeared = self._available_interfaces - current
 
         active_changed = False
         for iface in disappeared:
