@@ -19,8 +19,21 @@ import time
 from select import select
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
+from discovery.commands import (
+    ScannerActiveInterfacesChanged,
+    ScannerAnnounce,
+    ScannerAvailableInterfacesChanged,
+    ScannerResultsRemove,
+    ScannerResultsUpdate,
+    ScanResultItem,
+    ServerClearCache,
+    ServerSetActiveInterfaces,
+    ServerStopScanner,
+    ServerToScannerMessageAdapter,
+    StatusResponse,
+)
 from discovery.scanners.base_scanner import BaseScanner
 from scapy.layers.l2 import Ether
 from scapy.contrib.lldp import (
@@ -138,13 +151,11 @@ class LldpScanner(BaseScanner):
             )
 
         self._available_interfaces: set[str] = {name for _, name in socket.if_nameindex()}
-        self.server.send_msg({
-            "command": "announce",
-            "type": "scanner",
-            "name": "lldp.v1",
-            "parameters": vars(self._params),
-            "interfaces": list(self._available_interfaces),
-        })
+        self.server.send_cmd(ScannerAnnounce(
+            name="lldp.v1",
+            parameters=vars(self._params),
+            interfaces=list(self._available_interfaces),
+        ))
         self.wait_for_registration()
 
         self._active_interfaces: set[str] = set()
@@ -198,10 +209,7 @@ class LldpScanner(BaseScanner):
         for key in removed_keys:
             del self._cache[key]
         if removed_keys:
-            self.server.send_msg({
-                "command": "scan_results_remove",
-                "keys": removed_keys,
-            })
+            self.server.send_cmd( ScannerResultsRemove(keys=removed_keys))
 
     def _check_interfaces(self) -> None:
         assert self.server is not None
@@ -221,14 +229,8 @@ class LldpScanner(BaseScanner):
         self._available_interfaces = current
 
         if active_changed:
-            self.server.send_msg({
-                "command": "active_interfaces_changed",
-                "interfaces": list(self._active_interfaces),
-            })
-        self.server.send_msg({
-            "command": "available_interfaces_changed",
-            "interfaces": list(self._available_interfaces),
-        })
+            self.server.send_cmd( ScannerActiveInterfacesChanged(interfaces=list(self._active_interfaces)))
+        self.server.send_cmd( ScannerAvailableInterfacesChanged(interfaces=list(self._available_interfaces)))
 
     def _expire_records(self, now: float) -> None:
         assert self.server is not None
@@ -240,10 +242,7 @@ class LldpScanner(BaseScanner):
             del self._cache[key]
         if expired_keys:
             logger.debug("Expired %d LLDP cache entries", len(expired_keys))
-            self.server.send_msg({
-                "command": "scan_results_remove",
-                "keys": expired_keys,
-            })
+            self.server.send_cmd( ScannerResultsRemove(keys=expired_keys))
 
     def _clear_cache(self) -> None:
         assert self.server is not None
@@ -251,10 +250,7 @@ class LldpScanner(BaseScanner):
         self._cache.clear()
         logger.info("Cache cleared, removing %d previously reported neighbors", len(keys))
         if keys:
-            self.server.send_msg({
-                "command": "scan_results_remove",
-                "keys": keys,
-            })
+            self.server.send_cmd( ScannerResultsRemove(keys=keys))
 
     def _handle_lldp_packet(self) -> None:
         assert self.server is not None
@@ -297,10 +293,7 @@ class LldpScanner(BaseScanner):
             # Shutdown LLDPDU — the neighbor is going offline.
             if key in self._cache:
                 del self._cache[key]
-                self.server.send_msg({
-                    "command": "scan_results_remove",
-                    "keys": [key],
-                })
+                self.server.send_cmd( ScannerResultsRemove(keys=[key]))
             return
 
         # Optional TLVs
@@ -345,10 +338,7 @@ class LldpScanner(BaseScanner):
         if existing is None or any(
             getattr(neighbor, f) != getattr(existing, f) for f in _CONTENT_FIELDS
         ):
-            self.server.send_msg({
-                "command": "scan_results_update",
-                "results": [{"key": key, "result": neighbor.model_dump()}],
-            })
+            self.server.send_cmd( ScannerResultsUpdate(results=[ScanResultItem(key=key, result=neighbor.model_dump())]))
 
     def _handle_server_msgs(self) -> None:
         assert self.server is not None
@@ -359,10 +349,16 @@ class LldpScanner(BaseScanner):
             self._keep_running = False
             return
 
-        for msg in msgs:
-            match msg.get("command"):
-                case "set_active_interfaces":
-                    requested = set(msg.get("interfaces", []))
+        for raw in msgs:
+            try:
+                cmd = ServerToScannerMessageAdapter.validate_python(raw)
+            except ValidationError:
+                logger.warning("Unknown/invalid command from server: %r", raw.get("command"))
+                continue
+
+            match cmd:
+                case ServerSetActiveInterfaces():
+                    requested = set(cmd.interfaces)
                     for iface in requested - self._active_interfaces:
                         try:
                             self._join_interface(iface)
@@ -370,21 +366,18 @@ class LldpScanner(BaseScanner):
                             logger.warning("Failed to activate LLDP on %s", iface, exc_info=True)
                     for iface in self._active_interfaces - requested:
                         self._leave_interface(iface)
-                    self.server.send_msg({
-                        "command": "active_interfaces_changed",
-                        "interfaces": list(self._active_interfaces),
-                    })
+                    self.server.send_cmd( ScannerActiveInterfacesChanged(interfaces=list(self._active_interfaces)))
 
-                case "clear_cache":
+                case ServerClearCache():
                     logger.debug("clear_cache received")
                     self._clear_cache()
 
-                case "stop_scanner":
+                case ServerStopScanner():
                     logger.info("stop_scanner received, shutting down")
                     self._keep_running = False
 
-                case unknown:
-                    logger.warning("Unknown command from server: %r", unknown)
+                case StatusResponse():
+                    pass  # acknowledgement from server
 
 
 if __name__ == "__main__":
