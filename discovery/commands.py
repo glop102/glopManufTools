@@ -229,6 +229,21 @@ class ServerResultsRemove(BaseModel):
     keys: list[str]
 
 
+ServerToClientMessage = Annotated[
+    Union[
+        StatusResponse,
+        ServerAvailableScannersChanged,
+        ServerAvailableInterfacesChanged,
+        ServerActiveInterfacesChanged,
+        ServerParametersChanged,
+        ServerResultsUpdate,
+        ServerResultsRemove,
+    ],
+    Field(discriminator="command"),
+]
+ServerToClientMessageAdapter: TypeAdapter[ServerToClientMessage] = TypeAdapter(ServerToClientMessage)
+
+
 # ─── Server → Scanner ─────────────────────────────────────────────────────────
 
 class ServerSetActiveInterfaces(BaseModel):
