@@ -224,6 +224,13 @@ Example — server accepting that announce:
 (scanner disconnects)
     Server removes the scanner from its registered list.
 
+    -> "scan_results_remove" (server) -> (all clients)
+        scanner: str
+        keys: list[str]
+        If the scanner had any cached results, the server broadcasts a removal for all
+        of them before notifying of the scanner list change. Only sent if the cache was
+        non-empty.
+
     -> "available_scanners_changed" (server) -> (all clients)
         Server notifies all clients of the updated scanner list.
 
@@ -238,6 +245,17 @@ Example — server accepting that announce:
         (no extra fields)
 
     -> "available_interfaces_changed" (server) -> (all clients)
+        Server forwards the change to every connected client with the scanner name attached.
+
+
+"active_interfaces_changed" (scanner) -> (server)
+    Scanner reports its active interface set has changed.
+    Server always responds accepted and updates its cached scanner state.
+
+    -> "status: accepted" (server) -> (scanner)
+        (no extra fields)
+
+    -> "active_interfaces_changed" (server) -> (all clients)
         Server forwards the change to every connected client with the scanner name attached.
 
 

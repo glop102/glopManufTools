@@ -23,7 +23,7 @@ Both must send an `announce` message on connect before any other commands are ac
 
 Each scanner type is its own process. Scanners connect to the server and register themselves, declaring their name, available interfaces, and accepted parameters. The server caches all scanner state and result data, and broadcasts changes to all connected clients.
 
-Built-in scanners (`mdns.v1`, `test`) can be launched on demand via the `start_builtin_scanner` command. External scanners can connect independently using the same protocol.
+Built-in scanners (`mdns.v1`, `lldp.v1`, `test`) can be launched on demand via the `start_builtin_scanner` command. External scanners can connect independently using the same protocol.
 
 ### Privilege Model
 
@@ -77,10 +77,35 @@ Key helpers on `BaseScanner`:
 
 ### mDNS (`mdns.v1`)
 
-Listens on the IPv6 mDNS multicast address (`ff02::fb`, port 5353) using a dual-stack socket. Interface membership is managed dynamically: when the server sends `set_active_interfaces`, the scanner joins or leaves the multicast group on each named interface.
+Listens on an IPv6 UDP socket for mDNS responses. Interface membership is managed dynamically: when the server sends `set_active_interfaces`, the scanner joins or leaves the multicast group on each named interface. The scanner also sends periodic PTR queries to the multicast group — one for the top-level meta-query domain and one per already-known service type — to solicit responses from devices that don't advertise spontaneously.
 
-Parameters: `port` (default 5353), `bind_address` (default `::`)
+Parameters:
+- `port` (default `5353`) — UDP port to listen on
+- `bind_address` (default `::`) — IPv6 address to bind to
+- `multicast_group` (default `ff02::fb`) — IPv6 multicast group to join and query
+- `query_domain` (default `_services._dns-sd._udp.local.`) — top-level PTR query domain sent on each active query cycle
+- `active_query_delay` (default `4.0`) — seconds between active query bursts
+
+Cache key: `{interface}/{hostname}`
 
 Result types are defined in `discovery.scanners.mdns`:
 - `MDNSHostData` — a host with its addresses and services
 - `MDNSServiceData` — a single service instance (name, type, port, TXT records)
+
+### LLDP (`lldp.v1`)
+
+Listens passively for LLDP frames on active interfaces using a single raw `AF_PACKET` socket. Requires `CAP_NET_RAW` (or root). The scanner connects and announces without elevation; when the first interface is activated it attempts to open the raw socket and calls `reexec()` if that fails with `PermissionError`.
+
+Entries expire automatically based on the TTL value in each LLDP frame (`received_at + ttl < now`). A shutdown LLDPDU (TTL = 0) removes the entry immediately.
+
+Cache key: `{interface}/{chassis_id}`
+
+Result type is `LLDPNeighborData` from `discovery.scanners.lldp`:
+- `interface` — interface the neighbor was seen on
+- `chassis_id` — formatted chassis ID string
+- `port_id` — formatted port ID string
+- `ttl` — hold time in seconds from the TTL TLV
+- `received_at` — `time.time()` when the entry was last refreshed
+- `system_name`, `system_description`, `port_description` — optional TLV strings
+- `capabilities` — list of enabled capability labels (e.g. `['router', 'bridge']`)
+- `management_addresses` — list of formatted management address strings
