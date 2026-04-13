@@ -509,3 +509,37 @@ class TestFanout:
         msg = _find(msgs, "available_scanners_changed")
         assert msg is not None
         assert "temp.v1" not in msg.get("scanners", [])
+
+    def test_scanner_disconnect_broadcasts_results_remove_for_cached_results(self, client, server_port):
+        scanner_conn = _announce_scanner(server_port, name="temp.v1")
+        _wait_for(client, "available_scanners_changed")
+        _drain(client)
+        scanner_conn.send_msg({
+            "command": "scan_results_update",
+            "results": [{"key": "eth0/host.local.", "result": {"x": 1}}],
+        })
+        _wait_for(client, "scan_results_update", scanner="temp.v1")
+        _drain(client)
+        scanner_conn.close()
+        msgs = _wait_for(client, "scan_results_remove", scanner="temp.v1")
+        msg = _find(msgs, "scan_results_remove", scanner="temp.v1")
+        assert msg is not None
+        assert "eth0/host.local." in msg.get("keys", [])
+
+    def test_scanner_disconnect_results_remove_before_available_scanners_changed(self, client, server_port):
+        scanner_conn = _announce_scanner(server_port, name="temp.v1")
+        _wait_for(client, "available_scanners_changed")
+        _drain(client)
+        scanner_conn.send_msg({
+            "command": "scan_results_update",
+            "results": [{"key": "eth0/host.local.", "result": {"x": 1}}],
+        })
+        _wait_for(client, "scan_results_update", scanner="temp.v1")
+        _drain(client)
+        scanner_conn.close()
+        msgs = _wait_for(client, "available_scanners_changed")
+        remove_idx = next((i for i, m in enumerate(msgs) if m.get("command") == "scan_results_remove" and m.get("scanner") == "temp.v1"), None)
+        changed_idx = next((i for i, m in enumerate(msgs) if m.get("command") == "available_scanners_changed"), None)
+        assert remove_idx is not None, "Expected scan_results_remove broadcast"
+        assert changed_idx is not None, "Expected available_scanners_changed broadcast"
+        assert remove_idx < changed_idx, "scan_results_remove must arrive before available_scanners_changed"
