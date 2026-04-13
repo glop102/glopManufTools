@@ -198,8 +198,7 @@ class DiscoveryServer:
                     elif s in self.scanners:
                         assert isinstance(s, ScannerConnection)
                         logger.info(f"Disconnecting Scanner {s.name!r} (write error)")
-                        self.scanners.remove(s)
-                        self._broadcast_to_clients_cmd(ServerAvailableScannersChanged(scanners=[sc.name for sc in self.scanners]))
+                        self._disconnect_scanner(s)
 
             for s in ready_to_read:
                 if s == self.socket:
@@ -235,8 +234,7 @@ class DiscoveryServer:
                         self._handle_scanner_msgs(s, msgs)
                     except ConnectionError:
                         logger.info(f"    Disconnecting Scanner {s.name!r}")
-                        self.scanners.remove(s)
-                        self._broadcast_to_clients_cmd(ServerAvailableScannersChanged(scanners=[sc.name for sc in self.scanners]))
+                        self._disconnect_scanner(s)
                 else:
                     logger.error(
                         f"Unknown socket returned from select read list {s}",
@@ -248,6 +246,14 @@ class DiscoveryServer:
             if sc.name == name:
                 return sc
         return None
+
+    def _disconnect_scanner(self, sc: "ScannerConnection") -> None:
+        self.scanners.remove(sc)
+        if sc.results:
+            keys = list(sc.results.keys())
+            sc.results.clear()
+            self._broadcast_to_clients_cmd(ServerResultsRemove(scanner=sc.name, keys=keys))
+        self._broadcast_to_clients_cmd(ServerAvailableScannersChanged(scanners=[s.name for s in self.scanners]))
 
     def _broadcast_to_clients_cmd(self, model) -> None:
         for client in self.clients:
