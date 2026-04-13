@@ -21,6 +21,7 @@ from discovery.commands import (
     ClientSetActiveInterfaces,
     ClientStartBuiltinScanner,
     ClientStopScanner,
+    ServerActiveInterfacesChanged,
     ServerAvailableInterfacesChanged,
     ServerAvailableScannersChanged,
     ServerResultsRemove,
@@ -36,16 +37,20 @@ _STARTUP_TIMEOUT = 5.0  # seconds to wait for a scanner to appear
 
 
 class DiscoveryWorker(QThread):
-    hosts_updated = pyqtSignal(str, dict)   # key, MDNSHostData-dict
-    hosts_removed = pyqtSignal(list)        # list[str] of keys
-    status_changed = pyqtSignal(str)        # "connecting" | "connected" | "error: ..."
-    scanners_changed = pyqtSignal(list, list)  # running: list[str], builtins: list[str]
+    status_changed     = pyqtSignal(str)              # "connecting" | "connected" | "error: ..."
+    scanner_added      = pyqtSignal(str, list, list)  # name, available_interfaces, active_interfaces
+    scanner_removed    = pyqtSignal(str)              # name
+    results_updated    = pyqtSignal(str, str, object) # scanner, key, result dict
+    results_removed    = pyqtSignal(str, list)        # scanner, keys
+    interfaces_updated = pyqtSignal(str, list, list)  # scanner, available, active
+    builtin_scanners_known = pyqtSignal(list)         # list[str] of builtin scanner names
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._cmd_queue: queue.SimpleQueue[BaseModel] = queue.SimpleQueue()
         self._active_scanners: list[str] = []
-        self._builtin_scanners: list[str] = []
+        # Per-scanner interface state: name -> {"available": [...], "active": [...]}
+        self._scanner_info: dict[str, dict] = {}
 
     def stop_all_scanners(self) -> None:
         """Thread-safe: request that all known scanners be stopped."""
@@ -59,6 +64,10 @@ class DiscoveryWorker(QThread):
     def start_builtin_scanner(self, name: str) -> None:
         """Thread-safe: request that a builtin scanner be started."""
         self._cmd_queue.put(ClientStartBuiltinScanner(scanner=name))
+
+    def set_scanner_interfaces(self, scanner: str, interfaces: list[str]) -> None:
+        """Thread-safe: request that a scanner's active interfaces be updated."""
+        self._cmd_queue.put(ClientSetActiveInterfaces(scanner=scanner, interfaces=interfaces))
 
     def run(self) -> None:
         self.status_changed.emit("connecting")
@@ -105,42 +114,49 @@ class DiscoveryWorker(QThread):
         return ServerToClientMessageAdapter.validate_python(self._recv(client, timeout))
 
     def _setup(self, client) -> None:
-        """Announce, ensure mdns.v1 is running, activate interfaces, seed UI."""
-        # 1. Announce
+        """Announce, ensure mdns.v1 is running, and seed the UI for all running scanners."""
         client.send_cmd(ClientAnnounce())
         resp = self._recv_parsed(client)
         assert isinstance(resp, StatusResponse)
         current_scanners: list[str] = resp.model_extra.get("scanners", [])
         self._active_scanners = list(current_scanners)
 
-        # 2. Fetch the list of builtin scanners from the server
         client.send_cmd(ClientGetBuiltinScanners())
         builtins_resp = self._recv_parsed(client)
         assert isinstance(builtins_resp, StatusResponse)
-        self._builtin_scanners = builtins_resp.model_extra.get("scanners", [])
-
-        # 3. Start mdns.v1 if not already running, otherwise seed UI from running scanners
-        if "mdns.v1" not in current_scanners:
-            self._do_start_scanner(client, "mdns.v1")
-            return  # _do_start_scanner emits status_changed and scanners_changed
+        self.builtin_scanners_known.emit(builtins_resp.model_extra.get("scanners", []))
 
         for name in current_scanners:
-            client.send_cmd(ClientGetRegisteredScanner(scanner=name))
-            scanner_info = self._recv_parsed(client)
-            assert isinstance(scanner_info, StatusResponse)
-            available: list[str] = scanner_info.model_extra.get("available_interfaces", [])
-            active = [iface for iface in available if not iface.startswith("lo")]
+            self._setup_running_scanner(client, name)
+
+        if "mdns.v1" not in current_scanners:
+            self._do_start_scanner(client, "mdns.v1")
+
+        self.status_changed.emit("connected")
+
+    def _setup_running_scanner(self, client, name: str) -> None:
+        """Query a running scanner's state, activate non-loopback interfaces, seed results."""
+        client.send_cmd(ClientGetRegisteredScanner(scanner=name))
+        info = self._recv_parsed(client)
+        assert isinstance(info, StatusResponse)
+        available: list[str] = info.model_extra.get("available_interfaces", [])
+        active: list[str] = info.model_extra.get("active_interfaces", [])
+
+        if not active:
+            active = [i for i in available if not i.startswith("lo")]
             if active:
                 client.send_cmd(ClientSetActiveInterfaces(scanner=name, interfaces=active))
                 self._recv_parsed(client)  # consume status: accepted
-            client.send_cmd(ClientGetResults(scanner=name))
-            results_resp = self._recv_parsed(client)
-            assert isinstance(results_resp, StatusResponse)
-            for item in results_resp.model_extra.get("results", []):
-                self.hosts_updated.emit(item["key"], item["result"])
 
-        self.status_changed.emit("connected")
-        self.scanners_changed.emit(list(self._active_scanners), list(self._builtin_scanners))
+        client.send_cmd(ClientGetResults(scanner=name))
+        results_resp = self._recv_parsed(client)
+        assert isinstance(results_resp, StatusResponse)
+
+        self._scanner_info[name] = {"available": available, "active": active}
+        self.scanner_added.emit(name, list(available), list(active))
+
+        for item in results_resp.model_extra.get("results", []):
+            self.results_updated.emit(name, item["key"], item["result"])
 
     def _wait_for_scanner(self, client, scanner_name: str) -> bool:
         """
@@ -149,10 +165,8 @@ class DiscoveryWorker(QThread):
         """
         deadline = time.monotonic() + _STARTUP_TIMEOUT
         while time.monotonic() < deadline:
-            # Drain any already-buffered messages first
             while self._buf:
-                raw = self._buf.popleft()
-                msg = ServerToClientMessageAdapter.validate_python(raw)
+                msg = ServerToClientMessageAdapter.validate_python(self._buf.popleft())
                 if isinstance(msg, ServerAvailableScannersChanged) and scanner_name in msg.scanners:
                     return True
             remaining = deadline - time.monotonic()
@@ -185,24 +199,7 @@ class DiscoveryWorker(QThread):
             return
 
         self._active_scanners.append(name)
-
-        client.send_cmd(ClientGetRegisteredScanner(scanner=name))
-        scanner_info = self._recv_parsed(client)
-        assert isinstance(scanner_info, StatusResponse)
-        available: list[str] = scanner_info.model_extra.get("available_interfaces", [])
-        active = [iface for iface in available if not iface.startswith("lo")]
-        if active:
-            client.send_cmd(ClientSetActiveInterfaces(scanner=name, interfaces=active))
-            self._recv_parsed(client)  # consume status: accepted
-
-        client.send_cmd(ClientGetResults(scanner=name))
-        results_resp = self._recv_parsed(client)
-        assert isinstance(results_resp, StatusResponse)
-        for item in results_resp.model_extra.get("results", []):
-            self.hosts_updated.emit(item["key"], item["result"])
-
-        self.status_changed.emit("connected")
-        self.scanners_changed.emit(list(self._active_scanners), list(self._builtin_scanners))
+        self._setup_running_scanner(client, name)
 
     def _loop(self, client) -> None:
         """Main event loop — forwards scan results to the UI thread via signals."""
@@ -241,16 +238,31 @@ class DiscoveryWorker(QThread):
         match msg:
             case ServerResultsUpdate():
                 for item in msg.results:
-                    self.hosts_updated.emit(item.key, item.result)
+                    self.results_updated.emit(msg.scanner, item.key, item.result)
             case ServerResultsRemove():
                 if msg.keys:
-                    self.hosts_removed.emit(msg.keys)
+                    self.results_removed.emit(msg.scanner, msg.keys)
             case ServerAvailableScannersChanged():
+                new_set = set(msg.scanners)
+                for removed in set(self._active_scanners) - new_set:
+                    self._scanner_info.pop(removed, None)
+                    self.scanner_removed.emit(removed)
                 self._active_scanners = list(msg.scanners)
-                self.scanners_changed.emit(list(self._active_scanners), list(self._builtin_scanners))
             case ServerAvailableInterfacesChanged():
-                active = [i for i in msg.interfaces if not i.startswith("lo")]
-                if active:
-                    client.send_cmd(ClientSetActiveInterfaces(scanner="mdns.v1", interfaces=active))
+                info = self._scanner_info.get(msg.scanner, {})
+                info["available"] = list(msg.interfaces)
+                self._scanner_info[msg.scanner] = info
+                active = info.get("active", [])
+                self.interfaces_updated.emit(msg.scanner, list(msg.interfaces), list(active))
+                # Auto-activate any non-loopback interfaces not yet active
+                new_active = [i for i in msg.interfaces if not i.startswith("lo")]
+                if new_active != active:
+                    client.send_cmd(ClientSetActiveInterfaces(scanner=msg.scanner, interfaces=new_active))
+            case ServerActiveInterfacesChanged():
+                info = self._scanner_info.get(msg.scanner, {})
+                info["active"] = list(msg.interfaces)
+                self._scanner_info[msg.scanner] = info
+                available = info.get("available", [])
+                self.interfaces_updated.emit(msg.scanner, list(available), list(msg.interfaces))
             case _:
                 pass
