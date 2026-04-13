@@ -244,10 +244,13 @@ class DiscoveryWorker(QThread):
                     self.results_removed.emit(msg.scanner, msg.keys)
             case ServerAvailableScannersChanged():
                 new_set = set(msg.scanners)
-                for removed in set(self._active_scanners) - new_set:
+                old_set = set(self._active_scanners)
+                for removed in old_set - new_set:
                     self._scanner_info.pop(removed, None)
                     self.scanner_removed.emit(removed)
                 self._active_scanners = list(msg.scanners)
+                for added in new_set - old_set:
+                    self._setup_running_scanner(client, added)
             case ServerAvailableInterfacesChanged():
                 info = self._scanner_info.get(msg.scanner, {})
                 info["available"] = list(msg.interfaces)
