@@ -23,20 +23,33 @@ class DiscoveryWorker(QThread):
     hosts_updated = pyqtSignal(str, dict)   # key, MDNSHostData-dict
     hosts_removed = pyqtSignal(list)        # list[str] of keys
     status_changed = pyqtSignal(str)        # "connecting" | "connected" | "error: ..."
+    scanners_changed = pyqtSignal(list, list)  # running: list[str], builtins: list[str]
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._cmd_queue: queue.SimpleQueue[dict] = queue.SimpleQueue()
         self._active_scanners: list[str] = []
+        self._builtin_scanners: list[str] = []
 
     def stop_all_scanners(self) -> None:
         """Thread-safe: request that all known scanners be stopped."""
         for scanner in list(self._active_scanners):
             self._cmd_queue.put({"command": "stop_scanner", "scanner": scanner})
 
+    def stop_scanner(self, name: str) -> None:
+        """Thread-safe: request that a specific scanner be stopped."""
+        self._cmd_queue.put({"command": "stop_scanner", "scanner": name})
+
     def start_mdns_scanner(self) -> None:
         """Thread-safe: request that mdns.v1 be started (no-op if already running)."""
         self._cmd_queue.put({"command": "_start_mdns"})
+
+    def start_builtin_scanner(self, name: str) -> None:
+        """Thread-safe: request that a builtin scanner be started."""
+        if name == "mdns.v1":
+            self._cmd_queue.put({"command": "_start_mdns"})
+        else:
+            self._cmd_queue.put({"command": "start_builtin_scanner", "scanner": name})
 
     def run(self) -> None:
         self.status_changed.emit("connecting")
@@ -86,7 +99,12 @@ class DiscoveryWorker(QThread):
         current_scanners: list[str] = resp.get("scanners", [])
         self._active_scanners = list(current_scanners)
 
-        # 2. Start mdns.v1 if not already running
+        # 2. Fetch the list of builtin scanners from the server
+        client.send_msg({"command": "get_builtin_scanners"})
+        builtins_resp = self._recv(client)
+        self._builtin_scanners = builtins_resp.get("scanners", [])
+
+        # 3. Start mdns.v1 if not already running
         if "mdns.v1" not in current_scanners:
             client.send_msg({"command": "start_builtin_scanner", "scanner": "mdns.v1"})
             start_resp = self._recv(client)
@@ -96,7 +114,7 @@ class DiscoveryWorker(QThread):
                 raise RuntimeError("mdns.v1 did not start within timeout")
             self._active_scanners.append("mdns.v1")
 
-        # 3. Get available interfaces and activate non-loopback ones
+        # 4. Get available interfaces and activate non-loopback ones
         client.send_msg({"command": "get_registered_scanner", "scanner": "mdns.v1"})
         scanner_info = self._recv(client)
         available: list[str] = scanner_info.get("available_interfaces", [])
@@ -110,13 +128,14 @@ class DiscoveryWorker(QThread):
             })
             self._recv(client)  # consume status: accepted
 
-        # 4. Seed UI with any results already known to the server
+        # 5. Seed UI with any results already known to the server
         client.send_msg({"command": "get_results", "scanner": "mdns.v1"})
         results_resp = self._recv(client)
         for entry in results_resp.get("results", []):
             self.hosts_updated.emit(entry["key"], entry["result"])
 
         self.status_changed.emit("connected")
+        self.scanners_changed.emit(list(self._active_scanners), list(self._builtin_scanners))
 
     def _wait_for_scanner(self, client, scanner_name: str) -> bool:
         """
@@ -224,6 +243,9 @@ class DiscoveryWorker(QThread):
                 keys = msg.get("keys", [])
                 if keys:
                     self.hosts_removed.emit(keys)
+            case "available_scanners_changed":
+                self._active_scanners = msg.get("scanners", [])
+                self.scanners_changed.emit(list(self._active_scanners), list(self._builtin_scanners))
             case "available_interfaces_changed":
                 available: list[str] = msg.get("interfaces", [])
                 active = [i for i in available if not i.startswith("lo")]

@@ -51,14 +51,8 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(500, 400)
 
         # Menu bar
-        scanners_menu = QMenu("Scanners", self)
-        start_action = QAction("Start mdns.v1 scanner", self)
-        start_action.triggered.connect(self._on_start_mdns_scanner)
-        scanners_menu.addAction(start_action)
-        stop_action = QAction("Stop all scanners", self)
-        stop_action.triggered.connect(self._on_stop_all_scanners)
-        scanners_menu.addAction(stop_action)
-        self.menuBar().addMenu(scanners_menu)
+        self._scanners_menu = QMenu("Scanners", self)
+        self.menuBar().addMenu(self._scanners_menu)
 
         # Central widget
         central = QWidget()
@@ -143,13 +137,21 @@ class MainWindow(QMainWindow):
         self._tree.expandToDepth(0)
         self._tree.resizeColumnToContents(0)
 
-    def _on_start_mdns_scanner(self) -> None:
-        logger.info("Requesting start of mdns.v1 scanner")
-        self._worker.start_mdns_scanner()
-
-    def _on_stop_all_scanners(self) -> None:
-        logger.info("Requesting stop for all scanners")
-        self._worker.stop_all_scanners()
+    def update_scanners(self, running: list[str], builtins: list[str]) -> None:
+        """Rebuild the Scanners menu from the current server state."""
+        self._scanners_menu.clear()
+        for name in running:
+            action = QAction(f"Stop {name}", self)
+            action.triggered.connect(lambda checked, n=name: self._worker.stop_scanner(n))
+            self._scanners_menu.addAction(action)
+        startable = [b for b in builtins if b not in running]
+        if startable:
+            if running:
+                self._scanners_menu.addSeparator()
+            for name in startable:
+                action = QAction(f"Start {name}", self)
+                action.triggered.connect(lambda checked, n=name: self._worker.start_builtin_scanner(n))
+                self._scanners_menu.addAction(action)
 
 
 class DiscoveryApplet(QSystemTrayIcon):
@@ -172,6 +174,7 @@ class DiscoveryApplet(QSystemTrayIcon):
 
         # Main window — created but not shown
         self._window = MainWindow(worker=self.worker)
+        self.worker.scanners_changed.connect(self._window.update_scanners)
 
         self.activated.connect(self._on_activated)
         self._update_tooltip()
