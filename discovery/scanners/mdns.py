@@ -233,8 +233,8 @@ class MdnsScanner(BaseScanner):
         parser.add_argument(
             "--active-query-delay",
             type=float,
-            default=4.0,
-            help="Seconds between active mDNS queries (default: 4.0)",
+            default=2.5,
+            help="Seconds between active mDNS queries (default: 2.5)",
         )
         parser.add_argument(
             "--multicast-group",
@@ -294,12 +294,16 @@ class MdnsScanner(BaseScanner):
 
     def _leave_interface(self, interface: str) -> None:
         assert self.server is not None
-        mreq = struct.pack(
-            "16sI",
-            socket.inet_pton(socket.AF_INET6, self._params.multicast_group),
-            socket.if_nametoindex(interface),
-        )
-        self._mdns_listener.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_LEAVE_GROUP, mreq)
+        try:
+            mreq = struct.pack(
+                "16sI",
+                socket.inet_pton(socket.AF_INET6, self._params.multicast_group),
+                socket.if_nametoindex(interface),
+            )
+            self._mdns_listener.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_LEAVE_GROUP, mreq)
+        except OSError:
+            # Interface already gone — kernel has already torn down the membership
+            logger.debug("Skipping IPV6_LEAVE_GROUP for %s, interface no longer exists", interface)
         self._active_interfaces.discard(interface)
         logger.debug("Left mDNS multicast group on %s", interface)
 
@@ -356,7 +360,11 @@ class MdnsScanner(BaseScanner):
                 socket.IPV6_MULTICAST_IF,
                 struct.pack("I", socket.if_nametoindex(iface)),
             )
-            self._mdns_listener.sendto(pkt, (self._params.multicast_group, self._params.port))
+            try:
+                self._mdns_listener.sendto(pkt, (self._params.multicast_group, self._params.port))
+            except OSError:
+                logger.debug("[%s] skipping mDNS query, interface is down or unreachable", iface)
+                continue
             logger.debug(
                 "[%s] sent mDNS query for %s + %d service type(s)",
                 iface, self._params.query_domain, len(known_service_types),
@@ -587,6 +595,10 @@ class MdnsScanner(BaseScanner):
                 break
         if interface is None:
             logger.warning("Received mDNS packet with no IPV6_PKTINFO ancdata, dropping")
+            return
+
+        if interface not in self._active_interfaces:
+            logger.debug("[%s] dropping mDNS packet from inactive interface (L2 flooding?)", interface)
             return
 
         try:
