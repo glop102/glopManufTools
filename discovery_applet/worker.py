@@ -15,6 +15,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from discovery.client import DiscoveryClient
 from discovery.commands import (
     ClientAnnounce,
+    ClientClearCache,
     ClientGetBuiltinScanners,
     ClientGetRegisteredScanner,
     ClientGetResults,
@@ -68,6 +69,10 @@ class DiscoveryWorker(QThread):
     def set_scanner_interfaces(self, scanner: str, interfaces: list[str]) -> None:
         """Thread-safe: request that a scanner's active interfaces be updated."""
         self._cmd_queue.put(ClientSetActiveInterfaces(scanner=scanner, interfaces=interfaces))
+
+    def clear_scanner_cache(self, scanner: str) -> None:
+        """Thread-safe: request that a scanner's result cache be cleared."""
+        self._cmd_queue.put(ClientClearCache(scanners=[scanner]))
 
     def run(self) -> None:
         self.status_changed.emit("connecting")
@@ -143,7 +148,7 @@ class DiscoveryWorker(QThread):
         active: list[str] = info.model_extra.get("active_interfaces", [])
 
         if not active:
-            active = [i for i in available if not i.startswith("lo")]
+            active = [i for i in available if not i.startswith("lo") and i != "docker0"]
             if active:
                 client.send_cmd(ClientSetActiveInterfaces(scanner=name, interfaces=active))
                 self._recv_parsed(client)  # consume status: accepted
@@ -253,14 +258,17 @@ class DiscoveryWorker(QThread):
                     self._setup_running_scanner(client, added)
             case ServerAvailableInterfacesChanged():
                 info = self._scanner_info.get(msg.scanner, {})
+                prev_available = set(info.get("available", []))
                 info["available"] = list(msg.interfaces)
                 self._scanner_info[msg.scanner] = info
-                active = info.get("active", [])
+                active = set(info.get("active", []))
                 self.interfaces_updated.emit(msg.scanner, list(msg.interfaces), list(active))
-                # Auto-activate any non-loopback interfaces not yet active
-                new_active = [i for i in msg.interfaces if not i.startswith("lo")]
-                if new_active != active:
-                    client.send_cmd(ClientSetActiveInterfaces(scanner=msg.scanner, interfaces=new_active))
+                # Auto-activate only newly appeared interfaces, leaving the existing active
+                # set untouched so user-configured interface selections are not overridden
+                appeared = set(msg.interfaces) - prev_available
+                to_add = {i for i in appeared if not i.startswith("lo") and i != "docker0"}
+                if to_add - active:
+                    client.send_cmd(ClientSetActiveInterfaces(scanner=msg.scanner, interfaces=list(active | to_add)))
             case ServerActiveInterfacesChanged():
                 info = self._scanner_info.get(msg.scanner, {})
                 info["active"] = list(msg.interfaces)

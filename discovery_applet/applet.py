@@ -63,6 +63,28 @@ class _InterfaceMenu(QMenu):
             super().mouseReleaseEvent(event)
 
 
+def _setup_tree_context_menu(tree: QTreeWidget) -> None:
+    """Attach a right-click Copy action to a QTreeWidget."""
+    tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+
+    def _on_context_menu(pos) -> None:
+        item = tree.itemAt(pos)
+        if item is None:
+            return
+        menu = QMenu(tree)
+        copy_action = QAction("Copy", tree)
+
+        def _do_copy():
+            texts = [item.text(col) for col in range(tree.columnCount()) if item.text(col)]
+            QApplication.clipboard().setText("\t".join(texts))
+
+        copy_action.triggered.connect(_do_copy)
+        menu.addAction(copy_action)
+        menu.exec(tree.viewport().mapToGlobal(pos))
+
+    tree.customContextMenuRequested.connect(_on_context_menu)
+
+
 # ─── Results widgets ──────────────────────────────────────────────────────────
 
 class ScannerResultsWidget(QWidget):
@@ -87,6 +109,7 @@ class GenericResultsWidget(ScannerResultsWidget):
         self._tree.setHeaderLabels(["Key", "Value"])
         self._tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self._tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        _setup_tree_context_menu(self._tree)
         layout.addWidget(self._tree)
         self._items: dict[str, QTreeWidgetItem] = {}
 
@@ -123,6 +146,7 @@ class MDNSResultsWidget(ScannerResultsWidget):
         self._tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self._tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self._tree.setIndentation(16)
+        _setup_tree_context_menu(self._tree)
         layout.addWidget(self._tree)
         self._items: dict[str, QTreeWidgetItem] = {}
 
@@ -208,6 +232,11 @@ class ScannerWidget(QWidget):
         self._iface_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self._iface_btn.setMenu(self._iface_menu)
         header.addWidget(self._iface_btn)
+
+        clear_btn = QPushButton("Clear")
+        clear_btn.setFixedWidth(60)
+        clear_btn.clicked.connect(lambda: worker.clear_scanner_cache(name))
+        header.addWidget(clear_btn)
 
         stop_btn = QPushButton("Stop")
         stop_btn.setFixedWidth(60)
