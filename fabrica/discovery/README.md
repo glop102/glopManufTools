@@ -6,7 +6,7 @@ A broker process that manages scanner subprocesses and serves cached discovery r
 
 ### Transport
 
-The discovery server binds either a Unix domain socket (default) or a TCP socket. The default Unix socket path is `$XDG_RUNTIME_DIR/discovery`, falling back to `/tmp/glopmanuf/discovery`.
+The discovery server binds either a Unix domain socket (default) or a TCP socket. The default Unix socket path is `$XDG_RUNTIME_DIR/fabrica_discovery`, falling back to `/tmp/glopmanuf/fabrica_discovery`.
 
 All messages are JSON objects framed with a 4-byte big-endian length header. See `discovery_messages.md` for the full protocol reference.
 
@@ -36,7 +36,7 @@ By default the server exits when the last client disconnects. Pass `--persistent
 ## Connecting
 
 ```python
-from discovery.client import DiscoveryClient
+from fabrica.discovery.client import DiscoveryClient
 
 # Connects to the server, spawning it if it is not already running.
 client = DiscoveryClient.connect()
@@ -49,13 +49,13 @@ msgs = client.read_msgs()
 `DiscoveryClient` inherits from `MsgSocket` and speaks the protocol directly. Connections can target a Unix socket or TCP:
 
 ```python
-DiscoveryClient.connect(unix_socket_path=Path("/run/user/1000/discovery"))
+DiscoveryClient.connect(unix_socket_path=Path("/run/user/1000/fabrica_discovery"))
 DiscoveryClient.connect(tcp_socket=("127.0.0.1", 9100))
 ```
 
 ## Writing a Scanner
 
-Subclass `BaseScanner` from `discovery.scanners.base_scanner`:
+Subclass `BaseScanner` from `fabrica.discovery.scanners.base_scanner`:
 
 ```python
 class MyScanner(BaseScanner):
@@ -69,7 +69,7 @@ class MyScanner(BaseScanner):
 
 Key helpers on `BaseScanner`:
 - `parse_connection_args(argv)` — strips `--unix-socket` / `--tcp-socket` from argv and configures the connection
-- `connect_to_server()` — opens the connection (does not spawn)
+- `connect_to_server()` — opens the connection to an already-running server (does not spawn)
 - `wait_for_registration()` — blocks until the server accepts the `announce`
 - `reexec()` — re-execs under sudo when elevation is needed
 
@@ -84,13 +84,13 @@ Parameters:
 - `bind_address` (default `::`) — IPv6 address to bind to
 - `multicast_group` (default `ff02::fb`) — IPv6 multicast group to join and query
 - `query_domain` (default `_services._dns-sd._udp.local.`) — top-level PTR query domain sent on each active query cycle
-- `active_query_delay` (default `4.0`) — seconds between active query bursts
+- `active_query_delay` (default `2.5`) — seconds between active query bursts
 
 Cache key: `{interface}/{hostname}`
 
-Result types are defined in `discovery.scanners.mdns`:
-- `MDNSHostData` — a host with its addresses and services
-- `MDNSServiceData` — a single service instance (name, type, port, TXT records)
+Result types are defined in `fabrica.discovery.scanners.mdns`:
+- `MDNSHostData` — a host with its addresses and services; fields: `interface`, `hostname`, `addresses: list[str]`, `services: list[MDNSServiceData]`
+- `MDNSServiceData` — a single service instance; fields: `instance_name`, `service_type`, `port`, `txt: dict[str, str]`
 
 ### LLDP (`lldp.v1`)
 
@@ -100,7 +100,7 @@ Entries expire automatically based on the TTL value in each LLDP frame (`receive
 
 Cache key: `{interface}/{chassis_id}`
 
-Result type is `LLDPNeighborData` from `discovery.scanners.lldp`:
+Result type is `LLDPNeighborData` from `fabrica.discovery.scanners.lldp`:
 - `interface` — interface the neighbor was seen on
 - `chassis_id` — formatted chassis ID string
 - `port_id` — formatted port ID string

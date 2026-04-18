@@ -11,8 +11,8 @@ from fabrica.discovery.msg_socket import MsgSocket
 
 def _default_unix_socket_path() -> Path:
     if "XDG_RUNTIME_DIR" in os.environ:
-        return Path(os.environ["XDG_RUNTIME_DIR"]) / "fabrica"
-    return Path("/tmp/glopmanuf/fabrica")
+        return Path(os.environ["XDG_RUNTIME_DIR"]) / "fabrica_discovery"
+    return Path("/tmp/glopmanuf/fabrica_discovery")
 
 
 class DiscoveryClient(MsgSocket):

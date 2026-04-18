@@ -104,7 +104,7 @@ class DiscoveryServer:
         """
         Open the socket that clients and scanners connect through.
         unix_path is the socket file path (not a parent directory).
-        Defaults to $XDG_RUNTIME_DIR/fabrica or /tmp/glopmanuf/fabrica.
+        Defaults to $XDG_RUNTIME_DIR/fabrica_discovery or /tmp/glopmanuf/fabrica_discovery.
         """
         if tcp_socket:
             host, port = tcp_socket
@@ -118,9 +118,9 @@ class DiscoveryServer:
         else:
             if unix_path is None:
                 if "XDG_RUNTIME_DIR" in os.environ:
-                    unix_path = Path(os.environ["XDG_RUNTIME_DIR"]) / "fabrica"
+                    unix_path = Path(os.environ["XDG_RUNTIME_DIR"]) / "fabrica_discovery"
                 else:
-                    unix_path = Path("/tmp/glopmanuf/fabrica")
+                    unix_path = Path("/tmp/glopmanuf/fabrica_discovery")
 
             unix_path.parent.mkdir(exist_ok=True, parents=True)
             if unix_path.exists():
