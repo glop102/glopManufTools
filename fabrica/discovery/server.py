@@ -51,7 +51,7 @@ from .commands import (
 from .msg_socket import MsgSocket
 from ._utils import _parse_tcp_socket
 
-logger = logging.getLogger("discovery")
+logger = logging.getLogger("fabrica.discovery")
 
 
 
@@ -85,9 +85,9 @@ class ScannerConnection(MsgSocket):
 class DiscoveryServer:
     # Maps scanner name -> module path for scanners the server knows how to launch.
     _builtin_scanners = {
-        "test": "discovery.scanners.test_scanner",
-        "mdns.v1": "discovery.scanners.mdns",
-        "lldp.v1": "discovery.scanners.lldp",
+        "test": "fabrica.discovery.scanners.test_scanner",
+        "mdns.v1": "fabrica.discovery.scanners.mdns",
+        "lldp.v1": "fabrica.discovery.scanners.lldp",
     }
 
     def __init__(self):
@@ -104,7 +104,7 @@ class DiscoveryServer:
         """
         Open the socket that clients and scanners connect through.
         unix_path is the socket file path (not a parent directory).
-        Defaults to $XDG_RUNTIME_DIR/discovery or /tmp/glopmanuf/discovery.
+        Defaults to $XDG_RUNTIME_DIR/fabrica or /tmp/glopmanuf/fabrica.
         """
         if tcp_socket:
             host, port = tcp_socket
@@ -118,9 +118,9 @@ class DiscoveryServer:
         else:
             if unix_path is None:
                 if "XDG_RUNTIME_DIR" in os.environ:
-                    unix_path = Path(os.environ["XDG_RUNTIME_DIR"]) / "discovery"
+                    unix_path = Path(os.environ["XDG_RUNTIME_DIR"]) / "fabrica"
                 else:
-                    unix_path = Path("/tmp/glopmanuf/discovery")
+                    unix_path = Path("/tmp/glopmanuf/fabrica")
 
             unix_path.parent.mkdir(exist_ok=True, parents=True)
             if unix_path.exists():

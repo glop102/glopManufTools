@@ -12,8 +12,8 @@ from select import select
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from discovery.client import DiscoveryClient
-from discovery.commands import (
+from fabrica.discovery.client import DiscoveryClient
+from fabrica.discovery.commands import (
     ClientAnnounce,
     ClientClearCache,
     ClientGetBuiltinScanners,

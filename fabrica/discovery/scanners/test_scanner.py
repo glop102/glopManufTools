@@ -18,7 +18,7 @@ from select import select
 
 from pydantic import BaseModel, ValidationError
 
-from discovery.commands import (
+from fabrica.discovery.commands import (
     ParameterUpdate,
     ScannerActiveInterfacesChanged,
     ScannerAnnounce,
@@ -32,8 +32,8 @@ from discovery.commands import (
     ServerSetScannerParameters,
     ServerStopScanner,
 )
-from discovery.scanners.base_scanner import BaseScanner
-from discovery.scanners.mdns import MDNSHostData, MDNSServiceData
+from fabrica.discovery.scanners.base_scanner import BaseScanner
+from fabrica.discovery.scanners.mdns import MDNSHostData, MDNSServiceData
 
 
 class ScannerResult(BaseModel):

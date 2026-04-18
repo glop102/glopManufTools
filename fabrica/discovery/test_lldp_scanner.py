@@ -50,7 +50,7 @@ from scapy.contrib.lldp import (
 )
 from scapy.layers.l2 import Ether
 
-from discovery.scanners.lldp import (
+from fabrica.discovery.scanners.lldp import (
     ETH_P_LLDP,
     LLDPNeighborData,
     LldpScanner,

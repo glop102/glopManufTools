@@ -6,13 +6,13 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from discovery.msg_socket import MsgSocket
+from fabrica.discovery.msg_socket import MsgSocket
 
 
 def _default_unix_socket_path() -> Path:
     if "XDG_RUNTIME_DIR" in os.environ:
-        return Path(os.environ["XDG_RUNTIME_DIR"]) / "discovery"
-    return Path("/tmp/glopmanuf/discovery")
+        return Path(os.environ["XDG_RUNTIME_DIR"]) / "fabrica"
+    return Path("/tmp/glopmanuf/fabrica")
 
 
 class DiscoveryClient(MsgSocket):
@@ -76,7 +76,7 @@ class DiscoveryClient(MsgSocket):
         unix_socket_path: Optional[Path],
         tcp_socket: Optional[tuple[str, int]],
     ) -> None:
-        args = [sys.executable, "-m", "discovery.server"]
+        args = [sys.executable, "-m", "fabrica.discovery.server"]
         if tcp_socket:
             host, port = tcp_socket
             # Bracket IPv6 addresses to match HOST:PORT argparse convention

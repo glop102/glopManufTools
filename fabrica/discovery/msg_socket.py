@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from pydantic import BaseModel
 
-logger = logging.getLogger("discovery")
+logger = logging.getLogger("fabrica.discovery")
 
 
 class MsgSocket:

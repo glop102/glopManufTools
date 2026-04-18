@@ -5,13 +5,13 @@ import struct
 import sys
 import time
 from select import select
-from discovery.scanners.base_scanner import BaseScanner
+from fabrica.discovery.scanners.base_scanner import BaseScanner
 from abc import ABC, abstractmethod
 from typing import Optional, Protocol, TypedDict
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from discovery.commands import (
+from fabrica.discovery.commands import (
     ScannerActiveInterfacesChanged,
     ScannerAnnounce,
     ScannerAvailableInterfacesChanged,
@@ -32,7 +32,7 @@ from scapy.layers.dns import DNS, DNSQR, dnstypes
 MDNS_ADDR6 = "ff02::fb"
 MDNS_PORT = 5353
 
-logger = logging.getLogger("discovery.mdns")
+logger = logging.getLogger("fabrica.discovery.mdns")
 
 TYPE_A = 1
 TYPE_PTR = 12

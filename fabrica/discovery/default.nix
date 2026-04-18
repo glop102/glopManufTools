@@ -1,6 +1,6 @@
 { buildPythonPackage, setuptools, pydantic, scapy, tkinter }:
 buildPythonPackage {
-  pname = "discovery";
+  pname = "fabrica-discovery";
   version = "0.1.0";
   pyproject = true;
   src = ./.;

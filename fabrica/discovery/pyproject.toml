@@ -3,13 +3,13 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "discovery"
+name = "fabrica-discovery"
 version = "0.1.0"
 dependencies = ["pydantic", "scapy"]
 
 [tool.setuptools.package-dir]
-"discovery" = "."
-"discovery.scanners" = "scanners"
+"fabrica.discovery" = "."
+"fabrica.discovery.scanners" = "scanners"
 
 [tool.setuptools]
-packages = ["discovery", "discovery.scanners"]
+packages = ["fabrica.discovery", "fabrica.discovery.scanners"]

@@ -15,8 +15,8 @@ from typing import Optional
 
 import pytest
 
-from discovery.client import DiscoveryClient
-from discovery.server import DiscoveryServer
+from fabrica.discovery.client import DiscoveryClient
+from fabrica.discovery.server import DiscoveryServer
 
 
 # ---------------------------------------------------------------------------

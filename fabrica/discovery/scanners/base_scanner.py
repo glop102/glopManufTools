@@ -11,9 +11,9 @@ from typing import Optional
 
 from pydantic import ValidationError
 
-from discovery.client import DiscoveryClient
-from discovery._utils import _parse_tcp_socket
-from discovery.commands import StatusResponse
+from fabrica.discovery.client import DiscoveryClient
+from fabrica.discovery._utils import _parse_tcp_socket
+from fabrica.discovery.commands import StatusResponse
 
 
 class BaseScanner(ABC):
@@ -112,7 +112,7 @@ class BaseScanner(ABC):
         # SUDO_ASKPASS must be a single executable path, not a command string.
         # Write a copy of the askpass script with a shebang pointing to the
         # current interpreter so no shell is required.
-        askpass_exe = Path(tempfile.gettempdir()) / "discovery_askpass"
+        askpass_exe = Path(tempfile.gettempdir()) / "fabrica_discovery_askpass"
         askpass_exe.write_text(f"#!{sys.executable}\n" + askpass_py.read_text())
         askpass_exe.chmod(stat.S_IRWXU)
         env = os.environ.copy()

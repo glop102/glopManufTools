@@ -20,9 +20,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 from scapy.layers.dns import DNS, DNSRR, DNSRRSRV
 
-from discovery.client import DiscoveryClient
-from discovery.server import DiscoveryServer
-from discovery.scanners.mdns import (
+from fabrica.discovery.client import DiscoveryClient
+from fabrica.discovery.server import DiscoveryServer
+from fabrica.discovery.scanners.mdns import (
     TYPE_A, TYPE_AAAA, TYPE_PTR, TYPE_SRV, TYPE_TXT,
     MDNSARecord, MDNSAAAARecord, MDNSPTRRecord, MDNSTXTRecord, MDNSSRVRecord,
     MdnsScanner,

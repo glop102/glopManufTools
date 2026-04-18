@@ -21,7 +21,7 @@ from typing import Optional
 
 from pydantic import BaseModel, ValidationError
 
-from discovery.commands import (
+from fabrica.discovery.commands import (
     ScannerActiveInterfacesChanged,
     ScannerAnnounce,
     ScannerAvailableInterfacesChanged,
@@ -34,7 +34,7 @@ from discovery.commands import (
     ServerToScannerMessageAdapter,
     StatusResponse,
 )
-from discovery.scanners.base_scanner import BaseScanner
+from fabrica.discovery.scanners.base_scanner import BaseScanner
 from scapy.layers.l2 import Ether
 from scapy.contrib.lldp import (
     LLDPDU,
@@ -51,7 +51,7 @@ from scapy.contrib.lldp import (
 
 ETH_P_LLDP = 0x88CC
 
-logger = logging.getLogger("discovery.lldp")
+logger = logging.getLogger("fabrica.discovery.lldp")
 
 # Maps scapy's per-bit enabled field names to human-readable capability labels.
 _CAPABILITY_FIELDS: list[tuple[str, str]] = [

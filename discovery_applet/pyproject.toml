@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "discovery-applet"
 version = "0.1.0"
-dependencies = ["pyqt6", "discovery"]
+dependencies = ["pyqt6", "fabrica-discovery"]
 
 [project.scripts]
 discovery-applet = "discovery_applet.__main__:main"

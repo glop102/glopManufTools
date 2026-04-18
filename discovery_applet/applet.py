@@ -28,7 +28,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from discovery.scanners.mdns import MDNSHostData
+from fabrica.discovery.scanners.mdns import MDNSHostData
 from discovery_applet.worker import DiscoveryWorker
 
 logger = logging.getLogger("discovery_applet.applet")
