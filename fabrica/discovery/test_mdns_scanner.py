@@ -203,6 +203,8 @@ def mdns_scanner_thread(server_conn, free_tcp_port, free_udp_port):
     thread.start()
     _wait_for(server_conn, "available_scanners_changed")
     _drain(server_conn, timeout=0.5)  # flush any residual fanout from startup
+    _send_and_expect(server_conn, {"command": "set_active_interfaces", "scanner": "mdns.v1", "interfaces": ["lo"]})
+    _drain(server_conn, timeout=0.5)  # flush active_interfaces_changed fanout
     yield scanner, free_udp_port
     _send_and_expect(server_conn, {"command": "stop_scanner", "scanner": "mdns.v1"})
     thread.join(timeout=5.0)
