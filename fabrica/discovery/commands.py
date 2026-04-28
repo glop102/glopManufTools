@@ -81,6 +81,7 @@ ScannerMessageAdapter: TypeAdapter[ScannerMessage] = TypeAdapter(ScannerMessage)
 class ClientAnnounce(BaseModel):
     command: Literal["announce"] = "announce"
     type: Literal["client"] = "client"
+    unimportant: bool = False
 
 
 class ClientSetActiveInterfaces(BaseModel):

@@ -93,6 +93,7 @@ class DiscoveryServer:
     def __init__(self):
         self.unannounced_connections: list[MsgSocket] = []
         self.clients: list[MsgSocket] = []
+        self.unimportant_clients: list[MsgSocket] = []
         self.scanners: list[ScannerConnection] = []
         self.socket_path: Optional[Path] = None
 
@@ -154,7 +155,7 @@ class DiscoveryServer:
             self.open_server_socket(unix_path=unix_path, tcp_socket=tcp_socket)
             self.main_loop()
         finally:
-            for conn in self.unannounced_connections + self.clients + self.scanners:
+            for conn in self.unannounced_connections + self.clients + self.unimportant_clients + self.scanners:
                 conn.close()
             self.socket.close()
             if self.socket_path:
@@ -166,12 +167,13 @@ class DiscoveryServer:
     def main_loop(self):
         self.unannounced_connections: list[MsgSocket] = []
         self.clients: list[MsgSocket] = []
+        self.unimportant_clients: list[MsgSocket] = []
         self.scanners: list[ScannerConnection] = []
         self._continue_running = True
 
         while self._continue_running:
             all_connections = (
-                self.unannounced_connections + self.clients + self.scanners
+                self.unannounced_connections + self.clients + self.unimportant_clients + self.scanners
             )
             wait_until_read = [self.socket] + all_connections
             wait_until_write = [c for c in all_connections if c.msg_data_write_queued()]
@@ -193,8 +195,11 @@ class DiscoveryServer:
                         logger.info("Disconnecting Client Connection (write error)")
                         self.clients.remove(s)
                         if not self._persistent and len(self.clients) == 0:
-                            logger.info("Last client disconnected, shutting down")
+                            logger.info("Last important client disconnected, shutting down")
                             self.stop()
+                    elif s in self.unimportant_clients:
+                        logger.info("Disconnecting Unimportant Client Connection (write error)")
+                        self.unimportant_clients.remove(s)
                     elif s in self.scanners:
                         assert isinstance(s, ScannerConnection)
                         logger.info(f"Disconnecting Scanner {s.name!r} (write error)")
@@ -224,8 +229,16 @@ class DiscoveryServer:
                         logger.info("    Disconnecting Client Connection")
                         self.clients.remove(s)
                         if not self._persistent and len(self.clients) == 0:
-                            logger.info("Last client disconnected, shutting down")
+                            logger.info("Last important client disconnected, shutting down")
                             self.stop()
+                elif s in self.unimportant_clients:
+                    try:
+                        msgs: list[dict] = s.read_msgs()
+                        logger.debug(f"Unimportant client has delivered {len(msgs)} messages")
+                        self._handle_client_msgs(s, msgs)
+                    except ConnectionError:
+                        logger.info("    Disconnecting Unimportant Client Connection")
+                        self.unimportant_clients.remove(s)
                 elif s in self.scanners:
                     assert isinstance(s, ScannerConnection)
                     try:
@@ -256,7 +269,7 @@ class DiscoveryServer:
         self._broadcast_to_clients_cmd(ServerAvailableScannersChanged(scanners=[s.name for s in self.scanners]))
 
     def _broadcast_to_clients_cmd(self, model) -> None:
-        for client in self.clients:
+        for client in self.clients + self.unimportant_clients:
             try:
                 client.send_cmd(model, send_synchronous=False)
             except ConnectionError:
@@ -289,8 +302,12 @@ class DiscoveryServer:
             else:
                 # ClientAnnounce
                 self.unannounced_connections.remove(conn)
-                self.clients.append(conn)
-                logger.info("Client announced")
+                if msg.unimportant:
+                    self.unimportant_clients.append(conn)
+                    logger.info("Unimportant client announced")
+                else:
+                    self.clients.append(conn)
+                    logger.info("Client announced")
                 conn.send_cmd(StatusResponse(status="accepted", server_api_version=1, scanners=[sc.name for sc in self.scanners]), send_synchronous=False)
 
     def _handle_client_msgs(self, conn: MsgSocket, messages: list[dict]):
