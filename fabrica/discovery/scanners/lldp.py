@@ -7,12 +7,15 @@ is unique and stable — no multi-record resolution like mDNS requires.
 
 Requires CAP_NET_RAW (or root).  The scanner connects and announces without
 elevation; when the first interface is activated it attempts to open the raw
-socket and calls reexec() if that fails with PermissionError.
+socket and calls reexec() if that fails with PermissionError.  The interfaces
+that were being activated are handed to the elevated copy via the hidden
+--activate-interfaces argument so the request is not lost across the exec.
 
 Cache key: "{interface}/{chassis_id}"
 """
 import argparse
 import logging
+import os
 import socket
 import sys
 import time
@@ -141,7 +144,12 @@ class LldpScanner(BaseScanner):
 
     def start(self, args: list[str]) -> None:
         parser = argparse.ArgumentParser(description="LLDP scanner")
+        # Internal: set by reexec() so the elevated copy resumes the activation
+        # that triggered the elevation. Not a user-facing scanner parameter.
+        parser.add_argument("--activate-interfaces", nargs="*", default=[], help=argparse.SUPPRESS)
         self._params = parser.parse_args(args)
+        initial_interfaces: set[str] = set(self._params.activate_interfaces)
+        del self._params.activate_interfaces
 
         self.connect_to_server()
         if self.server is None:
@@ -163,6 +171,8 @@ class LldpScanner(BaseScanner):
         self._keep_running = True
 
         try:
+            if initial_interfaces:
+                self._set_active_interfaces(initial_interfaces & self._available_interfaces)
             while self._keep_running:
                 read_list = [self.server]
                 if self._lldp_socket is not None:
@@ -190,13 +200,41 @@ class LldpScanner(BaseScanner):
             socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_LLDP)
         )
 
-    def _join_interface(self, interface: str) -> None:
-        if self._lldp_socket is None:
-            try:
-                self._open_socket()
-            except PermissionError:
+    def _ensure_socket(self, requested: set[str]) -> bool:
+        """
+        Make sure the raw LLDP socket is open, elevating via reexec() if needed.
+        Returns False if the socket could not be opened.  requested is the full
+        set of interfaces being activated so the elevated copy can resume it.
+        """
+        if self._lldp_socket is not None:
+            return True
+        try:
+            self._open_socket()
+            return True
+        except PermissionError:
+            if os.geteuid() != 0:
                 logger.info("Insufficient privileges to open raw socket, re-execing with elevation")
-                self.reexec()  # replaces this process; does not return
+                self.reexec(extra_args=["--activate-interfaces", *sorted(requested)])  # does not return
+            logger.error("Cannot open raw LLDP socket even with elevated privileges", exc_info=True)
+            return False
+
+    def _set_active_interfaces(self, requested: set[str]) -> None:
+        """Reconcile the active interface set with requested and report the outcome."""
+        assert self.server is not None
+        to_join = requested - self._active_interfaces
+        if to_join and not self._ensure_socket(requested):
+            to_join = set()
+        for iface in to_join:
+            try:
+                self._join_interface(iface)
+            except OSError:
+                logger.warning("Failed to activate LLDP on %s", iface, exc_info=True)
+        for iface in self._active_interfaces - requested:
+            self._leave_interface(iface)
+        self.server.send_cmd(ScannerActiveInterfacesChanged(interfaces=list(self._active_interfaces)))
+
+    def _join_interface(self, interface: str) -> None:
+        assert self._lldp_socket is not None
         self._active_interfaces.add(interface)
         logger.debug("Now listening for LLDP on %s", interface)
 
@@ -355,15 +393,7 @@ class LldpScanner(BaseScanner):
 
             match cmd:
                 case ServerSetActiveInterfaces():
-                    requested = set(cmd.interfaces)
-                    for iface in requested - self._active_interfaces:
-                        try:
-                            self._join_interface(iface)
-                        except OSError:
-                            logger.warning("Failed to activate LLDP on %s", iface, exc_info=True)
-                    for iface in self._active_interfaces - requested:
-                        self._leave_interface(iface)
-                    self.server.send_cmd( ScannerActiveInterfacesChanged(interfaces=list(self._active_interfaces)))
+                    self._set_active_interfaces(set(cmd.interfaces))
 
                 case ServerClearCache():
                     logger.debug("clear_cache received")

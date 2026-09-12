@@ -98,7 +98,7 @@ class BaseScanner(ABC):
         """
         ...
 
-    def reexec(self) -> None:
+    def reexec(self, extra_args: Optional[list[str]] = None) -> None:
         """
         Replace this process with a root-elevated copy via sudo.
         Does not return.
@@ -107,7 +107,13 @@ class BaseScanner(ABC):
         prompt appears without requiring pkexec or a polkit policy file.
         Uses sudo -E to preserve the environment so that nix/venv library paths
         remain intact in the elevated process.
+
+        The elevated copy restarts from the original command line, so any state
+        the scanner has accumulated since launch (for example the interfaces the
+        server asked it to activate) is lost unless it is passed back in through
+        extra_args, which are appended to sys.argv for the new process.
         """
+        argv = list(sys.argv) + list(extra_args or [])
         askpass_py = Path(__file__).parent.parent / "askpass.py"
         # SUDO_ASKPASS must be a single executable path, not a command string.
         # Write a copy of the askpass script with a shebang pointing to the
@@ -119,7 +125,7 @@ class BaseScanner(ABC):
         env["SUDO_ASKPASS"] = str(askpass_exe)
         bootstrap = (
             f"import sys; "
-            f"sys.argv = {sys.argv!r}; "
+            f"sys.argv = {argv!r}; "
             f"sys.path = {sys.path!r}; "
             f"import runpy; runpy.run_path({sys.argv[0]!r}, run_name='__main__')"
         )

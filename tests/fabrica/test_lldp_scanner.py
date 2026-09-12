@@ -388,6 +388,64 @@ class TestHandleLldpPacket:
 
 
 # ---------------------------------------------------------------------------
+# TestSetActiveInterfaces
+# ---------------------------------------------------------------------------
+
+class TestSetActiveInterfaces:
+    def test_reexec_carries_requested_interfaces(self, scanner_unit):
+        """When elevation is needed the full activation request must survive the exec."""
+        scanner_unit._lldp_socket = None
+        scanner_unit._active_interfaces = set()
+        with patch.object(LldpScanner, "_open_socket", side_effect=PermissionError), \
+             patch.object(LldpScanner, "reexec") as reexec, \
+             patch("os.geteuid", return_value=1000):
+            scanner_unit._set_active_interfaces({"eth1", "eth0"})
+        reexec.assert_called_once_with(extra_args=["--activate-interfaces", "eth0", "eth1"])
+
+    def test_permission_error_as_root_does_not_reexec(self, scanner_unit):
+        scanner_unit._lldp_socket = None
+        scanner_unit._active_interfaces = set()
+        with patch.object(LldpScanner, "_open_socket", side_effect=PermissionError), \
+             patch.object(LldpScanner, "reexec") as reexec, \
+             patch("os.geteuid", return_value=0):
+            scanner_unit._set_active_interfaces({"eth0"})
+        reexec.assert_not_called()
+        assert scanner_unit._active_interfaces == set()
+        sent = scanner_unit.server.send_cmd.call_args[0][0]
+        assert sent.interfaces == []
+
+    def test_joins_and_reports(self, scanner_unit):
+        scanner_unit._active_interfaces = set()
+        scanner_unit._set_active_interfaces({"eth0"})
+        assert scanner_unit._active_interfaces == {"eth0"}
+        sent = scanner_unit.server.send_cmd.call_args[0][0]
+        assert sent.interfaces == ["eth0"]
+
+    def test_leaves_removed_interfaces(self, scanner_unit):
+        scanner_unit._active_interfaces = {"eth0", "eth1"}
+        scanner_unit._set_active_interfaces({"eth0"})
+        assert scanner_unit._active_interfaces == {"eth0"}
+
+    def test_activate_interfaces_arg_hidden_from_parameters(self, scanner_unit):
+        """--activate-interfaces is internal plumbing and must not be announced as a parameter."""
+        announced = {}
+        def fake_send(cmd, **kw):
+            if cmd.__class__.__name__ == "ScannerAnnounce":
+                announced.update(cmd.parameters)
+        scanner_unit.server.send_cmd.side_effect = fake_send
+        with patch.object(LldpScanner, "connect_to_server"), \
+             patch.object(LldpScanner, "wait_for_registration"), \
+             patch.object(LldpScanner, "_set_active_interfaces") as set_active, \
+             patch("socket.if_nameindex", return_value=[(1, "lo"), (2, "eth0")]):
+            # The resumed activation runs before the main loop; use it to stop the loop.
+            set_active.side_effect = lambda _ifaces: scanner_unit.stop()
+            scanner_unit.start(["--activate-interfaces", "eth0", "wlan9"])
+        assert "activate_interfaces" not in announced
+        # Only interfaces that still exist are resumed.
+        set_active.assert_called_once_with({"eth0"})
+
+
+# ---------------------------------------------------------------------------
 # TestExpireRecords
 # ---------------------------------------------------------------------------
 
