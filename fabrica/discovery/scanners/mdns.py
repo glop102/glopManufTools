@@ -518,25 +518,34 @@ class MdnsScanner(BaseScanner):
         Walk changed records to find all (interface, hostname) pairs that need updating.
 
         - A/AAAA:   directly affected hostname
-        - SRV/TXT:  follow SRV target to get the hostname
-        - PTR:      follow PTR targets (instance names) then SRV targets to get hostnames
+        - SRV:      the record's own target is the hostname
+        - TXT:      follow the cached SRV for the same instance name to get the hostname
+        - PTR:      the record's target is the instance name; follow its cached SRV
+
+        The hostname is taken from the changed record wherever it carries one,
+        rather than re-found in the cache, because a goodbye (ttl=0) or a TTL
+        expiry has already removed the record from the cache by the time this
+        runs. Otherwise a withdrawn service would never be rebuilt and would
+        linger in the server cache.
         """
         affected: set[tuple[str, str]] = set()
         for r in changed:
             if isinstance(r, (MDNSARecord, MDNSAAAARecord)):
                 affected.add((r.interface, r.rrname))
-            elif isinstance(r, (MDNSSRVRecord, MDNSTXTRecord)):
-                for srv in self._record_cache:
-                    if isinstance(srv, MDNSSRVRecord) and srv.rrname == r.rrname and srv.interface == r.interface:
-                        affected.add((srv.interface, srv.target))
+            elif isinstance(r, MDNSSRVRecord):
+                affected.add((r.interface, r.target))
+            elif isinstance(r, MDNSTXTRecord):
+                affected |= self._hostnames_for_instance(r.interface, r.rrname)
             elif isinstance(r, MDNSPTRRecord):
-                for ptr in self._record_cache:
-                    if not (isinstance(ptr, MDNSPTRRecord) and ptr.rrname == r.rrname and ptr.interface == r.interface):
-                        continue
-                    for srv in self._record_cache:
-                        if isinstance(srv, MDNSSRVRecord) and srv.rrname == ptr.target and srv.interface == r.interface:
-                            affected.add((srv.interface, srv.target))
+                affected |= self._hostnames_for_instance(r.interface, r.target)
         return affected
+
+    def _hostnames_for_instance(self, interface: str, instance_name: str) -> set[tuple[str, str]]:
+        """(interface, hostname) pairs for every cached SRV record of a service instance."""
+        return {
+            (srv.interface, srv.target) for srv in self._record_cache
+            if isinstance(srv, MDNSSRVRecord) and srv.rrname == instance_name and srv.interface == interface
+        }
 
     def _build_host_data(self, interface: str, hostname: str) -> MDNSHostData:
         """Build an MDNSHostData from the current record cache for the given host."""

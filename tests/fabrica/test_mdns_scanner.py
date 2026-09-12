@@ -392,6 +392,29 @@ class TestResolveAffectedHostnames:
         result = scanner_unit._resolve_affected_hostnames(changed)
         assert result == set()
 
+    def test_srv_goodbye_resolves_from_record_not_cache(self, scanner_unit):
+        """After a goodbye/expiry the SRV is no longer cached; its own target must be used."""
+        changed = {_srv(interface="eth0", target="mydevice.local.")}
+        result = scanner_unit._resolve_affected_hostnames(changed)
+        assert result == {("eth0", "mydevice.local.")}
+
+    def test_ptr_goodbye_follows_own_target(self, scanner_unit):
+        """A withdrawn PTR names its instance directly; do not depend on other cached PTRs."""
+        scanner_unit._record_cache = {_srv(interface="eth0", target="mydevice.local.")}
+        changed = {_ptr(interface="eth0", target="My Service._http._tcp.local.")}
+        result = scanner_unit._resolve_affected_hostnames(changed)
+        assert result == {("eth0", "mydevice.local.")}
+
+    def test_ptr_only_affects_its_own_instance(self, scanner_unit):
+        scanner_unit._record_cache = {
+            _srv(interface="eth0", rrname="A._http._tcp.local.", target="a.local."),
+            _srv(interface="eth0", rrname="B._http._tcp.local.", target="b.local."),
+            _ptr(interface="eth0", target="B._http._tcp.local."),
+        }
+        changed = {_ptr(interface="eth0", target="A._http._tcp.local.")}
+        result = scanner_unit._resolve_affected_hostnames(changed)
+        assert result == {("eth0", "a.local.")}
+
     def test_interface_scoped(self, scanner_unit):
         scanner_unit._record_cache = {
             _srv(interface="eth0",  rrname="Svc._http._tcp.local.", target="host.local."),
@@ -457,6 +480,36 @@ def _pktinfo(ifindex: int) -> list:
 
 
 class TestHandleMdnsPacket:
+    def _feed(self, scanner, pkt: bytes) -> None:
+        scanner._mdns_listener.recvmsg.return_value = (pkt, _pktinfo(1), 0, ("::1", 5353, 0, 0))
+        with patch("socket.if_indextoname", return_value="lo"):
+            scanner._handle_mdns_packet()
+
+    def test_srv_goodbye_withdraws_service(self, scanner_unit):
+        scanner_unit._active_interfaces = {"lo"}
+        self._feed(scanner_unit, _build_response_packet())
+        first = scanner_unit.server.send_cmd.call_args[0][0]
+        assert first.command == "scan_results_update"
+        assert len(first.results[0].result["services"]) == 1
+
+        srv_bye = DNSRRSRV(rrname=_INSTANCE, ttl=0, priority=0, weight=0, port=8080, target=_HOSTNAME)
+        self._feed(scanner_unit, bytes(DNS(qr=1, aa=1, ancount=1, an=srv_bye)))
+        last = scanner_unit.server.send_cmd.call_args[0][0]
+        assert last.command == "scan_results_update"
+        host = last.results[0].result
+        assert host["hostname"] == _HOSTNAME.decode()
+        assert host["services"] == []
+        assert "fe80::1" in host["addresses"]
+
+    def test_ptr_goodbye_withdraws_service(self, scanner_unit):
+        scanner_unit._active_interfaces = {"lo"}
+        self._feed(scanner_unit, _build_response_packet())
+        ptr_bye = DNSRR(rrname=_SVC_TYPE, type="PTR", ttl=0, rdata=_INSTANCE)
+        self._feed(scanner_unit, bytes(DNS(qr=1, aa=1, ancount=1, an=ptr_bye)))
+        last = scanner_unit.server.send_cmd.call_args[0][0]
+        assert last.command == "scan_results_update"
+        assert last.results[0].result["services"] == []
+
     def test_packet_from_vanished_interface_is_dropped(self, scanner_unit):
         """A datagram queued before its interface was removed must not crash the scanner."""
         scanner_unit._mdns_listener.recvmsg.return_value = (
