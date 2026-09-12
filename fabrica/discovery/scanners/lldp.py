@@ -39,7 +39,6 @@ from scapy.layers.l2 import Ether
 from scapy.contrib.lldp import (
     LLDPDU,
     LLDPDUChassisID,
-    LLDPDUEndOfLLDPDU,
     LLDPDUManagementAddress,
     LLDPDUPortDescription,
     LLDPDUPortID,
@@ -306,14 +305,14 @@ class LldpScanner(BaseScanner):
         capabilities = _decode_capabilities(cap_tlv) if cap_tlv else []
 
         # Collect all Management Address TLVs (there may be more than one per LLDPDU).
-        management_addresses: list[str] = []
-        tlv = lldp
-        while tlv is not None:
-            if isinstance(tlv, LLDPDUManagementAddress):
-                management_addresses.append(_decode_mgmt_address(tlv))
-            if isinstance(tlv, LLDPDUEndOfLLDPDU):
-                break
-            tlv = tlv.payload if hasattr(tlv, "payload") else None
+        # iterpayloads() walks the layer chain and stops at NoPayload, so a frame
+        # without an End-of-LLDPDU TLV (or with an unmodelled TLV that scapy turns
+        # into Raw) cannot spin this loop forever.
+        management_addresses: list[str] = [
+            _decode_mgmt_address(tlv)
+            for tlv in lldp.iterpayloads()
+            if isinstance(tlv, LLDPDUManagementAddress)
+        ]
 
         now = time.time()
         neighbor = LLDPNeighborData(

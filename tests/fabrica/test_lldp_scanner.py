@@ -351,6 +351,28 @@ class TestHandleLldpPacket:
         assert "10.0.0.1" in entry.management_addresses
         assert "fe80::1" in entry.management_addresses
 
+    def test_frame_without_end_tlv_terminates(self, scanner_unit):
+        """A frame missing End-of-LLDPDU (or with an unmodelled TLV that swallows it)
+        must not spin the management-address walk forever."""
+        ipv4 = socket.inet_pton(socket.AF_INET, "10.0.0.1")
+        full = _build_lldp_frame(mgmt_addresses=[(1, ipv4)])
+        # Strip the trailing 2-byte End-of-LLDPDU TLV (type 0, length 0).
+        assert full.endswith(b"\x00\x00")
+        self._feed(scanner_unit, full[:-2])
+        with patch("time.time", return_value=_NOW):
+            scanner_unit._handle_lldp_packet()
+        entry = scanner_unit._cache[f"{_IFNAME}/{_CHASSIS_MAC_STR}"]
+        assert "10.0.0.1" in entry.management_addresses
+
+    def test_unmodelled_tlv_before_end_terminates(self, scanner_unit):
+        """scapy renders an unknown TLV type as Raw, swallowing everything after it."""
+        full = _build_lldp_frame()
+        unknown_tlv = bytes([(10 << 1) | 0, 3]) + b"abc"  # type 10, length 3
+        self._feed(scanner_unit, full[:-2] + unknown_tlv + full[-2:])
+        with patch("time.time", return_value=_NOW):
+            scanner_unit._handle_lldp_packet()
+        assert f"{_IFNAME}/{_CHASSIS_MAC_STR}" in scanner_unit._cache
+
     def test_no_optional_tlvs_still_creates_entry(self, scanner_unit):
         self._feed(scanner_unit, _build_lldp_frame(
             include_system_name=False,
