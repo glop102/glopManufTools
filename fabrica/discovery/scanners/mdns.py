@@ -276,6 +276,10 @@ class MdnsScanner(BaseScanner):
                 self._check_interfaces()
 
                 now = time.time()
+                # Expire on every iteration, not only when a response arrives: on a
+                # quiet segment (a single DUT that is unplugged without a goodbye) no
+                # response ever comes, and the stale host would otherwise live forever.
+                self._publish_changes(self._expire_records(now))
                 if now - self._last_query_time >= self._params.active_query_delay:
                     self._send_query()
                     self._last_query_time = now
@@ -648,10 +652,14 @@ class MdnsScanner(BaseScanner):
             )
             if changed := self._process_rr(interface, rr, now):
                 changed_records.add(changed)
-        # Putting the cache expiry here in the packet handler with the expectation to have
-        # returned answers regularly to our periodic service query
-        changed_records |= self._expire_records(now)
+        self._publish_changes(changed_records)
 
+    def _publish_changes(self, changed_records: set[MDNSResponseRecord]) -> None:
+        """
+        Rebuild every host affected by changed_records from the record cache and
+        send the resulting updates/removals to the server.
+        """
+        assert self.server is not None
         if not changed_records:
             return
 

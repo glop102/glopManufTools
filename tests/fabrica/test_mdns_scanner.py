@@ -358,6 +358,40 @@ class TestExpireRecords:
 
 
 # ---------------------------------------------------------------------------
+# TestPublishChanges
+# ---------------------------------------------------------------------------
+
+class TestPublishChanges:
+    def test_expired_host_is_removed_without_any_packet(self, scanner_unit):
+        """Expiry publication must not depend on a response packet arriving."""
+        scanner_unit._record_cache = {
+            _ptr(ttl=10, received_at=_NOW),
+            _srv(ttl=10, received_at=_NOW),
+            _a(ttl=10, received_at=_NOW),
+        }
+        scanner_unit._publish_changes(scanner_unit._expire_records(_NOW + 11))
+        scanner_unit.server.send_cmd.assert_called_once()
+        model = scanner_unit.server.send_cmd.call_args[0][0]
+        assert model.command == "scan_results_remove"
+        assert model.keys == ["eth0/mydevice.local."]
+
+    def test_partial_expiry_sends_update(self, scanner_unit):
+        scanner_unit._record_cache = {
+            _ptr(ttl=10, received_at=_NOW),
+            _srv(ttl=10, received_at=_NOW),
+            _a(ttl=1000, received_at=_NOW),
+        }
+        scanner_unit._publish_changes(scanner_unit._expire_records(_NOW + 11))
+        model = scanner_unit.server.send_cmd.call_args[0][0]
+        assert model.command == "scan_results_update"
+        assert model.results[0].result["services"] == []
+
+    def test_nothing_changed_sends_nothing(self, scanner_unit):
+        scanner_unit._publish_changes(set())
+        scanner_unit.server.send_cmd.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # TestResolveAffectedHostnames
 # ---------------------------------------------------------------------------
 
