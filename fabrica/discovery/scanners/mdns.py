@@ -591,7 +591,13 @@ class MdnsScanner(BaseScanner):
         for cmsg_level, cmsg_type, cmsg_data in ancdata:
             if cmsg_level == socket.IPPROTO_IPV6 and cmsg_type == socket.IPV6_PKTINFO:
                 _ipi6_addr, ipi6_ifindex = struct.unpack("16sI", cmsg_data)
-                interface = socket.if_indextoname(ipi6_ifindex)
+                try:
+                    interface = socket.if_indextoname(ipi6_ifindex)
+                except OSError:
+                    # The interface was removed while this datagram was still queued;
+                    # _check_interfaces() will clean up its records on this iteration.
+                    logger.debug("Dropping mDNS packet from vanished interface index %d", ipi6_ifindex)
+                    return
                 break
         if interface is None:
             logger.warning("Received mDNS packet with no IPV6_PKTINFO ancdata, dropping")

@@ -8,6 +8,7 @@ packets to the bound address.
 """
 
 import socket
+import struct
 import threading
 import time
 from argparse import Namespace
@@ -444,6 +445,27 @@ class TestBuildHostData:
         host = scanner_unit._build_host_data("eth0", "mydevice.local.")
         assert host.addresses == []
         assert host.services == []
+
+
+# ---------------------------------------------------------------------------
+# TestHandleMdnsPacket
+# ---------------------------------------------------------------------------
+
+def _pktinfo(ifindex: int) -> list:
+    """Ancillary data as recvmsg() would return it for IPV6_RECVPKTINFO."""
+    return [(socket.IPPROTO_IPV6, socket.IPV6_PKTINFO, struct.pack("16sI", b"\0" * 16, ifindex))]
+
+
+class TestHandleMdnsPacket:
+    def test_packet_from_vanished_interface_is_dropped(self, scanner_unit):
+        """A datagram queued before its interface was removed must not crash the scanner."""
+        scanner_unit._mdns_listener.recvmsg.return_value = (
+            _build_response_packet(), _pktinfo(999_999), 0, ("::1", 5353, 0, 0),
+        )
+        with patch("socket.if_indextoname", side_effect=OSError(6, "No such device or address")):
+            scanner_unit._handle_mdns_packet()  # must not raise
+        scanner_unit.server.send_cmd.assert_not_called()
+        assert scanner_unit._record_cache == set()
 
 
 # ---------------------------------------------------------------------------
