@@ -26,8 +26,9 @@ from fabrica.discovery.server import DiscoveryServer
 from fabrica.discovery.scanners.mdns import (
     TYPE_A, TYPE_AAAA, TYPE_PTR, TYPE_SRV, TYPE_TXT,
     MDNSARecord, MDNSAAAARecord, MDNSPTRRecord, MDNSTXTRecord, MDNSSRVRecord,
-    MdnsScanner,
+    MdnsScanner, MDNS_PORT,
 )
+from fabrica.discovery.commands import ParameterUpdate
 
 
 # ---------------------------------------------------------------------------
@@ -553,6 +554,80 @@ class TestHandleMdnsPacket:
             scanner_unit._handle_mdns_packet()  # must not raise
         scanner_unit.server.send_cmd.assert_not_called()
         assert scanner_unit._record_cache == set()
+
+
+# ---------------------------------------------------------------------------
+# TestApplyParameterUpdates
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def scanner_params(scanner_unit):
+    """scanner_unit with real parsed parameters and their types, as start() sets them up."""
+    parser = MdnsScanner._build_parser()
+    scanner_unit._params = parser.parse_args([])
+    scanner_unit._param_types = MdnsScanner._parameter_types(parser)
+    return scanner_unit
+
+
+class TestApplyParameterUpdates:
+    def test_string_port_is_coerced_to_int(self, scanner_params):
+        with patch.object(MdnsScanner, "_rebind_listener", return_value=True):
+            changed = scanner_params._apply_parameter_updates([ParameterUpdate(name="port", value="5354")])
+        assert changed == ["port"]
+        assert scanner_params._params.port == 5354
+
+    @pytest.mark.parametrize("name,value", [
+        ("port", "not-a-port"),
+        ("port", 70000),
+        ("port", 5353.5),
+        ("port", True),
+        ("multicast_group", "224.0.0.251"),
+        ("bind_address", "nope"),
+        ("active_query_delay", "fast"),
+        ("active_query_delay", -1),
+        ("query_domain", 42),
+    ])
+    def test_invalid_values_are_rejected(self, scanner_params, name, value):
+        before = vars(scanner_params._params).copy()
+        with patch.object(MdnsScanner, "_rebind_listener") as rebind:
+            changed = scanner_params._apply_parameter_updates([ParameterUpdate(name=name, value=value)])
+        assert changed == []
+        assert vars(scanner_params._params) == before
+        rebind.assert_not_called()
+
+    def test_unknown_name_ignored(self, scanner_params):
+        changed = scanner_params._apply_parameter_updates([ParameterUpdate(name="bogus", value=1)])
+        assert changed == []
+
+    def test_non_listener_param_does_not_rebind(self, scanner_params):
+        with patch.object(MdnsScanner, "_rebind_listener") as rebind:
+            changed = scanner_params._apply_parameter_updates([ParameterUpdate(name="active_query_delay", value=5)])
+        assert changed == ["active_query_delay"]
+        assert scanner_params._params.active_query_delay == 5.0
+        rebind.assert_not_called()
+
+    def test_failed_rebind_rolls_back_listener_params(self, scanner_params):
+        old_listener = scanner_params._mdns_listener
+        with patch.object(MdnsScanner, "_create_mdns_listener", side_effect=OSError("bind failed")):
+            changed = scanner_params._apply_parameter_updates([
+                ParameterUpdate(name="port", value=1),
+                ParameterUpdate(name="active_query_delay", value=9),
+            ])
+        assert changed == ["active_query_delay"]
+        assert scanner_params._params.port == MDNS_PORT
+        assert scanner_params._mdns_listener is old_listener
+        old_listener.close.assert_not_called()
+
+    def test_successful_rebind_rejoins_active_interfaces(self, scanner_params):
+        scanner_params._active_interfaces = {"lo"}
+        new_listener = MagicMock()
+        with patch.object(MdnsScanner, "_create_mdns_listener", return_value=new_listener), \
+             patch("socket.if_nametoindex", return_value=1):
+            changed = scanner_params._apply_parameter_updates([ParameterUpdate(name="port", value=5354)])
+        assert changed == ["port"]
+        assert scanner_params._mdns_listener is new_listener
+        new_listener.setsockopt.assert_called()
+        assert scanner_params._active_interfaces == {"lo"}
 
 
 # ---------------------------------------------------------------------------

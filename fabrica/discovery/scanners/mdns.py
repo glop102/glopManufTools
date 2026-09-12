@@ -212,7 +212,8 @@ class MdnsScanner(BaseScanner):
         sock.bind((bind_address, port))
         return sock
 
-    def start(self, args: list[str]):
+    @staticmethod
+    def _build_parser() -> argparse.ArgumentParser:
         parser = argparse.ArgumentParser(description="mDNS scanner")
         parser.add_argument(
             "--port",
@@ -241,7 +242,21 @@ class MdnsScanner(BaseScanner):
             default=MDNS_ADDR6,
             help=f"IPv6 multicast group to join and query (default: {MDNS_ADDR6})",
         )
+        return parser
+
+    @staticmethod
+    def _parameter_types(parser: argparse.ArgumentParser) -> dict[str, type]:
+        """dest -> value type for every user-facing parameter (argparse's default type is str)."""
+        return {
+            a.dest: (a.type if isinstance(a.type, type) else str)
+            for a in parser._actions
+            if a.dest != "help"
+        }
+
+    def start(self, args: list[str]):
+        parser = self._build_parser()
         self._params = parser.parse_args(args)
+        self._param_types = self._parameter_types(parser)
 
         self.connect_to_server()
         if self.server is None:
@@ -392,25 +407,8 @@ class MdnsScanner(BaseScanner):
 
             match cmd:
                 case ServerSetScannerParameters():
-                    changed = []
-                    for entry in cmd.parameters:
-                        if not hasattr(self._params, entry.name):
-                            logger.warning("Ignoring unknown parameter %r", entry.name)
-                            continue
-                        if getattr(self._params, entry.name) == entry.value:
-                            continue
-                        setattr(self._params, entry.name, entry.value)
-                        changed.append(entry.name)
-                        logger.debug("Parameter %r changed to %r", entry.name, entry.value)
+                    changed = self._apply_parameter_updates(cmd.parameters)
                     if changed:
-                        if "port" in changed or "bind_address" in changed or "multicast_group" in changed:
-                            self._mdns_listener.close()
-                            self._clear_cache()
-                            self._mdns_listener = self._create_mdns_listener(
-                                self._params.bind_address, self._params.port
-                            )
-                            for iface in self._active_interfaces:
-                                self._join_interface(iface)
                         self.server.send_cmd( ScannerParametersChanged(parameters=[
                             ParameterUpdate(name=n, value=getattr(self._params, n)) for n in changed
                         ]))
@@ -436,6 +434,95 @@ class MdnsScanner(BaseScanner):
                 case ServerStopScanner():
                     logger.info("stop_scanner received, shutting down")
                     self._keep_running = False
+
+    _LISTENER_PARAMS = ("port", "bind_address", "multicast_group")
+
+    def _coerce_parameter(self, name: str, value: object) -> object:
+        """
+        Convert a client-supplied parameter value to the type the CLI parser would
+        have produced and check it is usable.  The server only validates parameter
+        names, so anything here can arrive over the wire.  Raises TypeError,
+        ValueError, or OSError on a bad value.
+        """
+        typ = self._param_types[name]
+        if isinstance(value, str):
+            coerced = typ(value)
+        elif typ is float and isinstance(value, (int, float)) and not isinstance(value, bool):
+            coerced = float(value)
+        elif typ is int and isinstance(value, int) and not isinstance(value, bool):
+            coerced = value
+        else:
+            raise TypeError(f"expected {typ.__name__}, got {type(value).__name__}")
+
+        if name == "port" and not 1 <= coerced <= 65535:
+            raise ValueError(f"port {coerced} out of range")
+        if name in ("bind_address", "multicast_group"):
+            socket.inet_pton(socket.AF_INET6, coerced)  # OSError if not an IPv6 literal
+        if name == "active_query_delay" and coerced <= 0:
+            raise ValueError("active_query_delay must be positive")
+        return coerced
+
+    def _apply_parameter_updates(self, updates: list[ParameterUpdate]) -> list[str]:
+        """
+        Validate and apply parameter updates from the server.  Invalid values are
+        logged and skipped rather than allowed to crash the scanner.  If the
+        listener has to be re-created and that fails, the listener parameters are
+        rolled back and the old socket is kept.  Returns the names that changed.
+        """
+        changed: list[str] = []
+        previous: dict[str, object] = {}
+        for entry in updates:
+            if entry.name not in self._param_types:
+                logger.warning("Ignoring unknown parameter %r", entry.name)
+                continue
+            try:
+                value = self._coerce_parameter(entry.name, entry.value)
+            except (TypeError, ValueError, OSError) as e:
+                logger.warning("Rejecting parameter %r=%r: %s", entry.name, entry.value, e)
+                continue
+            if getattr(self._params, entry.name) == value:
+                continue
+            previous[entry.name] = getattr(self._params, entry.name)
+            setattr(self._params, entry.name, value)
+            changed.append(entry.name)
+            logger.debug("Parameter %r changed to %r", entry.name, value)
+
+        if any(n in self._LISTENER_PARAMS for n in changed) and not self._rebind_listener():
+            for n in self._LISTENER_PARAMS:
+                if n in previous:
+                    setattr(self._params, n, previous[n])
+                    changed.remove(n)
+        return changed
+
+    def _rebind_listener(self) -> bool:
+        """
+        Replace the mDNS listener with one bound per the current parameters and
+        re-join the active interfaces on it.  Returns False, leaving the existing
+        listener and cache untouched, if the new socket cannot be created.
+        """
+        assert self.server is not None
+        try:
+            new_listener = self._create_mdns_listener(self._params.bind_address, self._params.port)
+        except OSError:
+            logger.warning(
+                "Cannot bind mDNS listener to [%s]:%s, keeping previous listener",
+                self._params.bind_address, self._params.port, exc_info=True,
+            )
+            return False
+        self._mdns_listener.close()
+        self._clear_cache()
+        self._mdns_listener = new_listener
+        lost: list[str] = []
+        for iface in sorted(self._active_interfaces):
+            try:
+                self._join_interface(iface)
+            except OSError:
+                logger.warning("Failed to re-join mDNS group on %s after rebind", iface, exc_info=True)
+                self._active_interfaces.discard(iface)
+                lost.append(iface)
+        if lost:
+            self.server.send_cmd( ScannerActiveInterfacesChanged(interfaces=list(self._active_interfaces)))
+        return True
 
     def _clear_cache(self) -> None:
         """
