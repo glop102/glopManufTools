@@ -36,9 +36,18 @@ class MsgSocket:
         skipped. This accounts for clients trying to send multiple messages at
         once and also clients sending messages in chunks.
         """
+        if self._sock.fileno() < 0:
+            raise ConnectionError("Socket already closed")
         # While the socket is readable, drain its buffer
         while len(select([self._sock], [], [], 0.0)[0]):
-            chunk = self._sock.recv(4096)
+            try:
+                chunk = self._sock.recv(4096)
+            except BlockingIOError:
+                break  # readable but nothing to take right now; not a failure
+            except OSError as e:
+                # Mirror the write path: anything else (ETIMEDOUT from a TCP
+                # retransmit timeout, EBADF, ...) means the peer is gone.
+                raise ConnectionError("Socket read failed") from e
             if not chunk:
                 raise ConnectionError(
                     "Socket Closed when retrieving buffer for messages"
