@@ -267,6 +267,72 @@ class TestAnnounce:
 
 
 # ---------------------------------------------------------------------------
+# TestAnnounceBatching
+# ---------------------------------------------------------------------------
+
+def _raw_frames(*msgs: dict) -> bytes:
+    """Frame several messages into one byte string so they arrive in a single read."""
+    import json, struct
+    out = b""
+    for m in msgs:
+        body = json.dumps(m).encode()
+        out += struct.pack(">I", len(body)) + body
+    return out
+
+
+class TestAnnounceBatching:
+    """Messages that arrive in the same read as the announce must not crash the server."""
+
+    def test_two_scanner_announces_in_one_batch(self, client, server_port):
+        _drain(client)
+        conn = DiscoveryClient.connect(tcp_socket=("127.0.0.1", server_port), spawn_if_missing=False)
+        announce = {"command": "announce", "type": "scanner", "name": "dup.v1", "interfaces": [], "parameters": {}}
+        conn._sock.sendall(_raw_frames(announce, announce))
+        resp = _recv_one(conn)
+        assert resp.get("status") == "accepted"
+        _wait_for(client, "available_scanners_changed")
+        _drain(client)
+        # Server must still be alive and serving other connections.
+        resp = _send_and_expect(client, {"command": "get_registered_scanners"})
+        assert "dup.v1" in [s.get("name") for s in resp.get("scanners", [])]
+        conn.close()
+
+    def test_two_client_announces_in_one_batch(self, server_port):
+        conn = DiscoveryClient.connect(tcp_socket=("127.0.0.1", server_port), spawn_if_missing=False)
+        announce = {"command": "announce", "type": "client"}
+        conn._sock.sendall(_raw_frames(announce, announce))
+        assert _recv_one(conn).get("status") == "accepted"
+        assert _recv_one(conn).get("status") == "rejected"
+        resp = _send_and_expect(conn, {"command": "get_builtin_scanners"})
+        assert "scanners" in resp
+        conn.close()
+
+    def test_command_coalesced_with_client_announce_is_served(self, server_port):
+        conn = DiscoveryClient.connect(tcp_socket=("127.0.0.1", server_port), spawn_if_missing=False)
+        conn._sock.sendall(_raw_frames(
+            {"command": "announce", "type": "client"},
+            {"command": "get_builtin_scanners"},
+        ))
+        assert _recv_one(conn).get("status") == "accepted"
+        resp = _recv_one(conn)
+        assert resp.get("status") == "accepted"
+        assert "scanners" in resp
+        conn.close()
+
+    def test_scanner_closing_right_after_announce_keeps_server_alive(self, client, server_port):
+        _drain(client)
+        for i in range(5):
+            conn = DiscoveryClient.connect(tcp_socket=("127.0.0.1", server_port), spawn_if_missing=False)
+            conn._sock.sendall(_raw_frames(
+                {"command": "announce", "type": "scanner", "name": f"flash{i}.v1", "interfaces": [], "parameters": {}},
+            ))
+            conn.close()
+        time.sleep(0.5)
+        resp = _send_and_expect(client, {"command": "get_registered_scanners"})
+        assert not [s for s in resp.get("scanners", []) if s.get("name", "").startswith("flash")]
+
+
+# ---------------------------------------------------------------------------
 # TestClientCommands
 # ---------------------------------------------------------------------------
 

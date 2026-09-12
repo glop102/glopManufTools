@@ -188,71 +188,73 @@ class DiscoveryServer:
                 try:
                     s.flush_write_buf()
                 except ConnectionError:
-                    if s in self.unannounced_connections:
-                        logger.info("Disconnecting Unannounced Connection (write error)")
-                        self.unannounced_connections.remove(s)
-                    elif s in self.clients:
-                        logger.info("Disconnecting Client Connection (write error)")
-                        self.clients.remove(s)
-                        if not self._persistent and len(self.clients) == 0:
-                            logger.info("Last important client disconnected, shutting down")
-                            self.stop()
-                    elif s in self.unimportant_clients:
-                        logger.info("Disconnecting Unimportant Client Connection (write error)")
-                        self.unimportant_clients.remove(s)
-                    elif s in self.scanners:
-                        assert isinstance(s, ScannerConnection)
-                        logger.info(f"Disconnecting Scanner {s.name!r} (write error)")
-                        self._disconnect_scanner(s)
+                    self._drop_connection(s, "write error")
 
             for s in ready_to_read:
                 if s == self.socket:
                     sock, _addr = self.socket.accept()
                     self.unannounced_connections.append(MsgSocket(sock))
                     logger.debug(f"New connection from {_addr}")
-                elif s in self.unannounced_connections:
-                    try:
-                        msgs: list[dict] = s.read_msgs()
-                        logger.debug(
-                            f"New Connection has delivered {len(msgs)} messages"
-                        )
-                        self._handle_unannounced_msgs(s, msgs)
-                    except ConnectionError:
-                        logger.info("    Disconnecting Unannounced Connection")
-                        self.unannounced_connections.remove(s)
+                    continue
+                if not self._is_tracked(s):
+                    # Dropped (and closed) earlier in this iteration, e.g. by a write error.
+                    continue
+                try:
+                    msgs: list[dict] = s.read_msgs()
+                except ConnectionError:
+                    self._drop_connection(s, "read error")
+                    continue
+                # A connection may have been promoted earlier in this iteration,
+                # so classify it now rather than trusting the select lists.
+                if s in self.unannounced_connections:
+                    logger.debug(f"New Connection has delivered {len(msgs)} messages")
+                    self._handle_unannounced_msgs(s, msgs)
                 elif s in self.clients:
-                    try:
-                        msgs: list[dict] = s.read_msgs()
-                        logger.debug(f"Client has delivered {len(msgs)} messages")
-                        self._handle_client_msgs(s, msgs)
-                    except ConnectionError:
-                        logger.info("    Disconnecting Client Connection")
-                        self.clients.remove(s)
-                        if not self._persistent and len(self.clients) == 0:
-                            logger.info("Last important client disconnected, shutting down")
-                            self.stop()
+                    logger.debug(f"Client has delivered {len(msgs)} messages")
+                    self._handle_client_msgs(s, msgs)
                 elif s in self.unimportant_clients:
-                    try:
-                        msgs: list[dict] = s.read_msgs()
-                        logger.debug(f"Unimportant client has delivered {len(msgs)} messages")
-                        self._handle_client_msgs(s, msgs)
-                    except ConnectionError:
-                        logger.info("    Disconnecting Unimportant Client Connection")
-                        self.unimportant_clients.remove(s)
+                    logger.debug(f"Unimportant client has delivered {len(msgs)} messages")
+                    self._handle_client_msgs(s, msgs)
                 elif s in self.scanners:
                     assert isinstance(s, ScannerConnection)
-                    try:
-                        msgs: list[dict] = s.read_msgs()
-                        logger.debug(f"    {msgs}")
-                        self._handle_scanner_msgs(s, msgs)
-                    except ConnectionError:
-                        logger.info(f"    Disconnecting Scanner {s.name!r}")
-                        self._disconnect_scanner(s)
+                    logger.debug(f"    {msgs}")
+                    self._handle_scanner_msgs(s, msgs)
                 else:
-                    logger.error(
-                        f"Unknown socket returned from select read list {s}",
-                        stack_info=True,
-                    )
+                    logger.debug(f"Ignoring {len(msgs)} messages from a connection dropped this iteration")
+
+    def _is_tracked(self, s: MsgSocket) -> bool:
+        return (
+            s in self.unannounced_connections
+            or s in self.clients
+            or s in self.unimportant_clients
+            or s in self.scanners
+        )
+
+    def _drop_connection(self, s: MsgSocket, reason: str) -> None:
+        """
+        Remove s from whichever connection list currently holds it.
+        Safe to call for a connection that was promoted (unannounced -> client/scanner)
+        or already dropped earlier in the same main-loop iteration.
+        """
+        if s in self.unannounced_connections:
+            logger.info(f"Disconnecting Unannounced Connection ({reason})")
+            self.unannounced_connections.remove(s)
+        elif s in self.clients:
+            logger.info(f"Disconnecting Client Connection ({reason})")
+            self.clients.remove(s)
+            if not self._persistent and len(self.clients) == 0:
+                logger.info("Last important client disconnected, shutting down")
+                self.stop()
+        elif s in self.unimportant_clients:
+            logger.info(f"Disconnecting Unimportant Client Connection ({reason})")
+            self.unimportant_clients.remove(s)
+        elif s in self.scanners:
+            assert isinstance(s, ScannerConnection)
+            logger.info(f"Disconnecting Scanner {s.name!r} ({reason})")
+            self._disconnect_scanner(s)
+        else:
+            logger.debug(f"Connection already dropped ({reason})")
+        s.close()
 
     def _lookup_registered_scanner(self, name: str) -> Optional[ScannerConnection]:
         for sc in self.scanners:
@@ -276,7 +278,14 @@ class DiscoveryServer:
                 logger.info("Client disconnected during broadcast, will be cleaned up by main loop")
 
     def _handle_unannounced_msgs(self, conn: MsgSocket, messages: list[dict]):
-        for raw in messages:
+        """
+        Process messages from a connection that has not yet announced.  Once an
+        announce is accepted the connection is promoted and any messages left in
+        this batch are handed to the handler for its new role, since the
+        connection is no longer in unannounced_connections.
+        """
+        for i, raw in enumerate(messages):
+            remaining = messages[i + 1:]
             if raw.get("command") != "announce":
                 logger.warning(f"Unknown command from unannounced connection: {raw.get('command')!r}")
                 conn.send_cmd(StatusResponse(status="rejected", reason=f"Expected announce, got {raw.get('command')!r}"), send_synchronous=False)
@@ -299,6 +308,9 @@ class DiscoveryServer:
                 logger.info(f"Scanner announced: {scanner_conn.name!r} with interfaces {scanner_conn.interfaces}")
                 scanner_conn.send_cmd(StatusResponse(status="accepted", server_api_version=1), send_synchronous=False)
                 self._broadcast_to_clients_cmd(ServerAvailableScannersChanged(scanners=[sc.name for sc in self.scanners]))
+                if remaining:
+                    self._handle_scanner_msgs(scanner_conn, remaining)
+                return
             else:
                 # ClientAnnounce
                 self.unannounced_connections.remove(conn)
@@ -309,6 +321,9 @@ class DiscoveryServer:
                     self.clients.append(conn)
                     logger.info("Client announced")
                 conn.send_cmd(StatusResponse(status="accepted", server_api_version=1, scanners=[sc.name for sc in self.scanners]), send_synchronous=False)
+                if remaining:
+                    self._handle_client_msgs(conn, remaining)
+                return
 
     def _handle_client_msgs(self, conn: MsgSocket, messages: list[dict]):
         for raw in messages:
