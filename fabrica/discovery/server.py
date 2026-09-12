@@ -270,6 +270,19 @@ class DiscoveryServer:
             self._broadcast_to_clients_cmd(ServerResultsRemove(scanner=sc.name, keys=keys))
         self._broadcast_to_clients_cmd(ServerAvailableScannersChanged(scanners=[s.name for s in self.scanners]))
 
+    def _forward_to_scanner(self, sc: ScannerConnection, model) -> bool:
+        """
+        Send a command to a scanner on behalf of a client.  Returns False if the
+        scanner connection is dead; the scanner is dropped here so the failure
+        is never attributed to the client whose command was being handled.
+        """
+        try:
+            sc.send_cmd(model, send_synchronous=False)
+            return True
+        except ConnectionError:
+            self._drop_connection(sc, "forward error")
+            return False
+
     def _broadcast_to_clients_cmd(self, model) -> None:
         for client in self.clients + self.unimportant_clients:
             try:
@@ -397,8 +410,10 @@ class DiscoveryServer:
                             interfaces=unknown,
                         ), send_synchronous=False)
                         continue
+                    if not self._forward_to_scanner(sc, ServerSetActiveInterfaces(interfaces=msg.interfaces)):
+                        conn.send_cmd(StatusResponse(status="rejected", reason=f"Scanner {msg.scanner!r} disconnected"), send_synchronous=False)
+                        continue
                     conn.send_cmd(StatusResponse(status="accepted"), send_synchronous=False)
-                    sc.send_cmd(ServerSetActiveInterfaces(interfaces=msg.interfaces), send_synchronous=False)
 
                 case ClientSetScannerParameters():
                     sc = self._lookup_registered_scanner(msg.scanner)
@@ -413,16 +428,20 @@ class DiscoveryServer:
                             parameters=unknown,
                         ), send_synchronous=False)
                         continue
+                    if not self._forward_to_scanner(sc, ServerSetScannerParameters(parameters=msg.parameters)):
+                        conn.send_cmd(StatusResponse(status="rejected", reason=f"Scanner {msg.scanner!r} disconnected"), send_synchronous=False)
+                        continue
                     conn.send_cmd(StatusResponse(status="accepted"), send_synchronous=False)
-                    sc.send_cmd(ServerSetScannerParameters(parameters=msg.parameters), send_synchronous=False)
 
                 case ClientStopScanner():
                     sc = self._lookup_registered_scanner(msg.scanner)
                     if sc is None:
                         conn.send_cmd(StatusResponse(status="rejected", reason=f"Scanner {msg.scanner!r} is not registered"), send_synchronous=False)
                         continue
+                    if not self._forward_to_scanner(sc, ServerStopScanner()):
+                        conn.send_cmd(StatusResponse(status="rejected", reason=f"Scanner {msg.scanner!r} disconnected"), send_synchronous=False)
+                        continue
                     conn.send_cmd(StatusResponse(status="accepted"), send_synchronous=False)
-                    sc.send_cmd(ServerStopScanner(), send_synchronous=False)
 
                 case ClientClearCache():
                     unknown = [name for name in msg.scanners if self._lookup_registered_scanner(name) is None]
@@ -436,12 +455,13 @@ class DiscoveryServer:
                     conn.send_cmd(StatusResponse(status="accepted"), send_synchronous=False)
                     for name in msg.scanners:
                         sc = self._lookup_registered_scanner(name)
-                        assert sc is not None
+                        if sc is None:
+                            continue  # dropped while clearing an earlier scanner in this list
                         if sc.results:
                             keys = list(sc.results.keys())
                             sc.results.clear()
                             self._broadcast_to_clients_cmd(ServerResultsRemove(scanner=name, keys=keys))
-                        sc.send_cmd(ServerClearCache(), send_synchronous=False)
+                        self._forward_to_scanner(sc, ServerClearCache())
 
                 case ClientGetResults():
                     sc = self._lookup_registered_scanner(msg.scanner)

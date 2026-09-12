@@ -333,6 +333,70 @@ class TestAnnounceBatching:
 
 
 # ---------------------------------------------------------------------------
+# TestDeadScannerForwarding
+# ---------------------------------------------------------------------------
+
+class TestDeadScannerForwarding:
+    """A dead scanner must not get a healthy client disconnected (or the server shut down)."""
+
+    @pytest.fixture
+    def direct_server(self):
+        from fabrica.discovery.msg_socket import MsgSocket
+        from fabrica.discovery.server import ScannerConnection
+        from fabrica.discovery.commands import ScannerAnnounce
+
+        server = DiscoveryServer()
+        server._persistent = False
+        server._continue_running = True
+
+        scanner_side, scanner_peer = socket.socketpair()
+        sc = ScannerConnection.promote(MsgSocket(scanner_side))
+        sc.first_connection_setup(ScannerAnnounce(name="dead.v1", interfaces=["eth0"], parameters={"rate": 1}))
+        sc.results = {"eth0/x": {"a": 1}}
+        server.scanners.append(sc)
+        scanner_peer.close()  # scanner process died; peer is gone
+
+        client_side, client_peer = socket.socketpair()
+        client = MsgSocket(client_side)
+        server.clients.append(client)
+        yield server, client, MsgSocket(client_peer), sc
+        client_side.close(); client_peer.close(); scanner_side.close()
+
+    @staticmethod
+    def _reply(peer) -> list[dict]:
+        ready, _, _ = select([peer], [], [], 2.0)
+        assert ready
+        return peer.read_msgs()
+
+    @pytest.mark.parametrize("cmd", [
+        {"command": "set_active_interfaces", "scanner": "dead.v1", "interfaces": ["eth0"]},
+        {"command": "set_scanner_parameters", "scanner": "dead.v1", "parameters": [{"name": "rate", "value": 2}]},
+        {"command": "stop_scanner", "scanner": "dead.v1"},
+    ])
+    def test_single_scanner_commands_reject_and_drop_scanner(self, direct_server, cmd):
+        server, client, client_peer, sc = direct_server
+        server._handle_client_msgs(client, [cmd])  # must not raise
+        msgs = self._reply(client_peer)
+        statuses = [m for m in msgs if m.get("command") == "status"]
+        assert statuses and statuses[-1]["status"] == "rejected"
+        assert "disconnected" in statuses[-1]["reason"]
+        assert client in server.clients
+        assert sc not in server.scanners
+        assert server._continue_running  # last client still connected -> no shutdown
+        # Clients are told the scanner (and its results) went away.
+        assert _find(msgs, "scan_results_remove", scanner="dead.v1") is not None
+        assert _find(msgs, "available_scanners_changed") is not None
+
+    def test_clear_cache_tolerates_dead_scanner(self, direct_server):
+        server, client, client_peer, sc = direct_server
+        server._handle_client_msgs(client, [{"command": "clear_cache", "scanners": ["dead.v1"]}])
+        msgs = self._reply(client_peer)
+        assert _find(msgs, "status", status="accepted") is not None
+        assert client in server.clients
+        assert sc not in server.scanners
+
+
+# ---------------------------------------------------------------------------
 # TestClientCommands
 # ---------------------------------------------------------------------------
 
